@@ -1,4 +1,4 @@
-name: GFS maps
+name: FutureWeather maps
 
 on:
   # GFS 0.25° output through F072 is usually on AWS about 4 hours after each

@@ -109,13 +109,37 @@ def get_field(cycle, fhr, index, match):
 
 # ---------------------------------------------------------------- plotting
 
+# Dark theme matching standardweather.github.io (css/site.css).
+BG = "#0d1020"        # page panel background
+LAND = "#1a2140"
+WATER = "#0f1430"
+LINES = "#8a93b8"     # state lines, coastlines
+CONTOUR = "#ffffff"
+BARBS = "#c9d2f0"
+TEXT = "#ffffff"
+TEXT2 = "#aab2cc"
+
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "text.color": TEXT,
+    "axes.labelcolor": TEXT2,
+    "xtick.color": TEXT2,
+    "ytick.color": TEXT2,
+    "savefig.facecolor": BG,
+})
+
+
 def new_map():
-    fig = plt.figure(figsize=(11, 7.6))
+    fig = plt.figure(figsize=(11, 7.6), facecolor=BG)
     ax = fig.add_axes([0.01, 0.11, 0.98, 0.84], projection=PROJ)
     ax.set_extent(MAP_EXTENT, crs=DATA_CRS)
-    ax.add_feature(cfeature.STATES.with_scale("50m"), linewidth=0.4, edgecolor="#555")
-    ax.add_feature(cfeature.BORDERS.with_scale("50m"), linewidth=0.7, edgecolor="#333")
-    ax.add_feature(cfeature.COASTLINE.with_scale("50m"), linewidth=0.7, edgecolor="#333")
+    ax.add_feature(cfeature.OCEAN.with_scale("50m"), facecolor=WATER, zorder=0)
+    ax.add_feature(cfeature.LAKES.with_scale("50m"), facecolor=WATER, zorder=0)
+    ax.add_feature(cfeature.LAND.with_scale("50m"), facecolor=LAND, zorder=0)
+    ax.add_feature(cfeature.STATES.with_scale("50m"), linewidth=0.4, edgecolor=LINES, zorder=3)
+    ax.add_feature(cfeature.BORDERS.with_scale("50m"), linewidth=0.7, edgecolor=LINES, zorder=3)
+    ax.add_feature(cfeature.COASTLINE.with_scale("50m"), linewidth=0.7, edgecolor=LINES, zorder=3)
+    ax.spines["geo"].set_edgecolor("#2a3156")
     return fig, ax
 
 
@@ -123,17 +147,30 @@ def finish(fig, ax, mappable, label, title, cycle, fhr, path):
     valid = cycle + timedelta(hours=fhr)
     ax.set_title(f"GFS 0.25°  {title}", loc="left", fontsize=11, fontweight="bold")
     ax.set_title(f"Init {cycle:%Y-%m-%d %HZ}   Valid {valid:%a %Y-%m-%d %HZ} (F{fhr:03d})",
-                 loc="right", fontsize=10)
-    cax = fig.add_axes([0.15, 0.07, 0.70, 0.022])
+                 loc="right", fontsize=10, color=TEXT2)
+    cax = fig.add_axes([0.15, 0.07, 0.70, 0.022], facecolor=BG)
     cb = fig.colorbar(mappable, cax=cax, orientation="horizontal")
+    if isinstance(mappable.norm, mcolors.BoundaryNorm):
+        cb.set_ticks(mappable.norm.boundaries)
+        cb.set_ticklabels([f"{b:g}" for b in mappable.norm.boundaries])
     cb.set_label(label, fontsize=9)
     cb.ax.tick_params(labelsize=8)
+    cb.outline.set_edgecolor("#2a3156")
     fig.savefig(path, dpi=100)
     plt.close(fig)
 
 
-def label_contours(ax, cs, fmt="%d"):
-    ax.clabel(cs, fmt=fmt, fontsize=7, inline=True, inline_spacing=2)
+def heights(ax, lon, lat, values, levels):
+    cs = ax.contour(lon, lat, values, levels=levels, colors=CONTOUR,
+                    linewidths=0.9, transform=DATA_CRS, zorder=4)
+    ax.clabel(cs, fmt="%d", fontsize=7, inline=True, inline_spacing=2)
+
+
+def barbs(ax, lon, lat, u, v):
+    skip = (slice(None, None, 10), slice(None, None, 10))
+    ax.barbs(lon[skip], lat[skip],
+             u.values[skip] * 1.94384, v.values[skip] * 1.94384,  # m/s -> kt
+             length=5, linewidth=0.5, color=BARBS, transform=DATA_CRS, zorder=5)
 
 
 def lonlat(da):
@@ -154,12 +191,21 @@ def plot_precip_mslp(cycle, fhr, f):
     cmap = mcolors.ListedColormap(PRECIP_COLORS)
     norm = mcolors.BoundaryNorm(PRECIP_LEVELS, cmap.N)
     cf = ax.contourf(lon, lat, precip, levels=PRECIP_LEVELS, cmap=cmap, norm=norm,
-                     transform=DATA_CRS)
-    cs = ax.contour(lon, lat, mslp, levels=np.arange(940, 1061, 4), colors="black",
-                    linewidths=0.9, transform=DATA_CRS)
-    label_contours(ax, cs)
+                     transform=DATA_CRS, zorder=2)
+    heights(ax, lon, lat, mslp, np.arange(940, 1061, 4))
     finish(fig, ax, cf, "6-hr precipitation (in)", "6-hr Precip (in), MSLP (hPa)",
            cycle, fhr, IMG / f"precip_mslp_f{fhr:03d}.png")
+
+
+# Weak vorticity (|ζ| < 4) is left clear; stronger values get brighter in each direction.
+VORT_LEVELS = [-24, -20, -16, -12, -8, -4, 4, 8, 12, 16, 20, 24]
+VORT_CMAP = mcolors.ListedColormap(
+    ["#9be7ff", "#4ad1ff", "#2f9fd8", "#2a6fb0", "#24497f",   # anticyclonic
+     (0, 0, 0, 0),                                             # -4 to 4: unshaded
+     "#7a2f3a", "#b8423f", "#e0603a", "#f5923e", "#ffd166"])  # cyclonic
+VORT_CMAP.set_under("#d4f5ff")
+VORT_CMAP.set_over("#fff1b8")
+VORT_NORM = mcolors.BoundaryNorm(VORT_LEVELS, VORT_CMAP.N)
 
 
 def plot_vort700(cycle, fhr, f):
@@ -170,16 +216,10 @@ def plot_vort700(cycle, fhr, f):
     hgt_dam = gaussian_filter(hgt.values / 10, sigma=1.5)
 
     fig, ax = new_map()
-    levels = np.arange(-20, 21, 2)
-    cf = ax.contourf(lon, lat, vort, levels=levels, cmap="RdBu_r", extend="both",
-                     transform=DATA_CRS)
-    cs = ax.contour(lon, lat, hgt_dam, levels=np.arange(240, 330, 3), colors="black",
-                    linewidths=0.9, transform=DATA_CRS)
-    label_contours(ax, cs)
-    skip = (slice(None, None, 10), slice(None, None, 10))
-    ax.barbs(lon[skip], lat[skip],
-             u.values[skip] * 1.94384, v.values[skip] * 1.94384,  # m/s -> kt
-             length=5, linewidth=0.5, color="#333", transform=DATA_CRS)
+    cf = ax.contourf(lon, lat, vort, levels=VORT_LEVELS, cmap=VORT_CMAP, norm=VORT_NORM,
+                     extend="both", transform=DATA_CRS, zorder=2)
+    heights(ax, lon, lat, hgt_dam, np.arange(240, 330, 3))
+    barbs(ax, lon, lat, u, v)
     finish(fig, ax, cf, "Relative vorticity (10⁻⁵ s⁻¹)",
            "700 mb Rel. Vorticity, Heights (dam), Wind (kt)",
            cycle, fhr, IMG / f"vort700_f{fhr:03d}.png")
@@ -192,15 +232,13 @@ def plot_wind200(cycle, fhr, f):
     hgt_dam = gaussian_filter(hgt.values / 10, sigma=1.5)
 
     fig, ax = new_map()
-    levels = np.arange(50, 201, 10)
-    cf = ax.contourf(lon, lat, speed, levels=levels, cmap="viridis_r", extend="max",
-                     transform=DATA_CRS)
-    cs = ax.contour(lon, lat, hgt_dam, levels=np.arange(1080, 1260, 12), colors="black",
-                    linewidths=0.9, transform=DATA_CRS)
-    label_contours(ax, cs)
-    skip = (slice(None, None, 10), slice(None, None, 10))
-    ax.barbs(lon[skip], lat[skip], u.values[skip] * 1.94384, v.values[skip] * 1.94384,
-             length=5, linewidth=0.5, color="#333", transform=DATA_CRS)
+    # Cyan -> violet -> magenta, echoing the site's accent gradient.
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "jet_stream", ["#1b4f7a", "#4ad1ff", "#8f6bff", "#e04fd0", "#ffd1f5"])
+    cf = ax.contourf(lon, lat, speed, levels=np.arange(50, 201, 10), cmap=cmap,
+                     extend="max", alpha=0.9, transform=DATA_CRS, zorder=2)
+    heights(ax, lon, lat, hgt_dam, np.arange(1080, 1260, 12))
+    barbs(ax, lon, lat, u, v)
     finish(fig, ax, cf, "Wind speed (kt)", "200 mb Wind Speed (kt), Heights (dam)",
            cycle, fhr, IMG / f"wind200_f{fhr:03d}.png")
 
