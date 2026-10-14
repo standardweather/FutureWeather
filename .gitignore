@@ -1,0 +1,4 @@
+site/img/
+site/data.json
+__pycache__/
+.claude/

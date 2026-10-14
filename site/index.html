@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GFS CONUS Maps</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1d2330; --muted: #5d6675;
+    --border: #d6dae1; --accent: #1f5fbf; --accent-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --text: #e6e9ee; --muted: #9aa3b2;
+      --border: #303746; --accent: #5b9bff; --accent-text: #0d1117;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1140px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 12px; }
+  h1 { font-size: 1.35rem; margin: 0; }
+  #run { color: var(--muted); font-size: 0.9rem; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  button {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  }
+  button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; margin-bottom: 10px;
+  }
+  #hour { flex: 1 1 200px; accent-color: var(--accent); }
+  #hourLabel { min-width: 13ch; font-variant-numeric: tabular-nums; }
+  figure { margin: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  figure img { display: block; width: 100%; height: auto; background: #fff; }
+  #msg { padding: 40px 16px; text-align: center; color: var(--muted); }
+  footer { color: var(--muted); font-size: 0.8rem; margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>GFS CONUS Maps</h1>
+    <span id="run">Loading…</span>
+  </header>
+
+  <div class="tabs" id="tabs" role="group" aria-label="Product"></div>
+
+  <div class="controls">
+    <button id="prev" aria-label="Previous hour">◀</button>
+    <button id="play" aria-label="Play loop">▶ Play</button>
+    <button id="next" aria-label="Next hour">▶</button>
+    <input id="hour" type="range" min="0" max="0" value="0" aria-label="Forecast hour">
+    <span id="hourLabel"></span>
+  </div>
+
+  <figure>
+    <img id="map" alt="" hidden>
+    <div id="msg">Loading…</div>
+  </figure>
+
+  <footer>Data: NOAA GFS via AWS Open Data. Updated automatically after each 00/06/12/18Z run. Use ← → keys to step through hours.</footer>
+</main>
+
+<script>
+  const state = { info: null, product: 0, hour: 0, timer: null };
+  const $ = (id) => document.getElementById(id);
+
+  function src(productId, fhr) {
+    // The cycle in the query string stops browsers showing a cached older run.
+    const f = String(fhr).padStart(3, "0");
+    return `img/${productId}_f${f}.png?run=${encodeURIComponent(state.info.cycle)}`;
+  }
+
+  function validTime(fhr) {
+    const t = new Date(new Date(state.info.init).getTime() + fhr * 3600e3);
+    const day = t.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+    return `${day} ${String(t.getUTCHours()).padStart(2, "0")}Z`;
+  }
+
+  function render() {
+    const { info } = state;
+    const product = info.products[state.product];
+    const fhr = info.hours[state.hour];
+    const img = $("map");
+    img.src = src(product.id, fhr);
+    img.alt = `${product.name}, forecast hour ${fhr}`;
+    $("hour").value = state.hour;
+    $("hourLabel").textContent = `F${String(fhr).padStart(3, "0")} · ${validTime(fhr)}`;
+    document.querySelectorAll("#tabs button").forEach((b, i) =>
+      b.setAttribute("aria-pressed", i === state.product));
+  }
+
+  function step(delta) {
+    const n = state.info.hours.length;
+    state.hour = (state.hour + delta + n) % n;
+    render();
+  }
+
+  function togglePlay(force) {
+    const playing = force ?? !state.timer;
+    clearInterval(state.timer);
+    state.timer = playing ? setInterval(() => step(1), 700) : null;
+    $("play").textContent = playing ? "❚❚ Pause" : "▶ Play";
+  }
+
+  function preload() {
+    const product = state.info.products[state.product];
+    state.info.hours.forEach((h) => { new Image().src = src(product.id, h); });
+  }
+
+  async function init() {
+    try {
+      const res = await fetch(`data.json?t=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(res.status);
+      state.info = await res.json();
+    } catch (e) {
+      $("run").textContent = "";
+      $("msg").textContent = "No model data has been published yet.";
+      return;
+    }
+    const { info } = state;
+    const init = new Date(info.init);
+    $("run").textContent =
+      `${info.model} · ${init.toISOString().slice(0, 10)} ${String(init.getUTCHours()).padStart(2, "0")}Z run`;
+
+    info.products.forEach((p, i) => {
+      const b = document.createElement("button");
+      b.textContent = p.name;
+      b.onclick = () => { state.product = i; render(); preload(); };
+      $("tabs").appendChild(b);
+    });
+
+    $("hour").max = info.hours.length - 1;
+    $("hour").oninput = (e) => { togglePlay(false); state.hour = +e.target.value; render(); };
+    $("prev").onclick = () => { togglePlay(false); step(-1); };
+    $("next").onclick = () => { togglePlay(false); step(1); };
+    $("play").onclick = () => togglePlay();
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") { togglePlay(false); step(-1); }
+      if (e.key === "ArrowRight") { togglePlay(false); step(1); }
+    });
+
+    $("map").onload = () => { $("map").hidden = false; $("msg").hidden = true; };
+    $("map").onerror = () => { $("map").hidden = true; $("msg").hidden = false; $("msg").textContent = "Image not available."; };
+    render();
+    preload();
+  }
+
+  init();
+</script>
+</body>
+</html>
