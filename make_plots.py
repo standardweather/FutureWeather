@@ -29,7 +29,7 @@ from metpy.units import units
 from scipy.ndimage import gaussian_filter
 
 BUCKET = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
-FORECAST_HOURS = list(range(6, 73, 6))  # F006 through F072, every 6 hours
+FORECAST_HOURS = list(range(6, 169, 6))  # F006 through F168 (7 days), every 6 hours
 
 # CONUS subset of the global grid (GFS longitudes run 0-360)
 LAT_SLICE = slice(60, 15)
