@@ -55,6 +55,14 @@
     .fw-hour small { display: block; font-weight: 500; font-size: 0.78rem; color: var(--accent); }
     .fw-map img { display: block; width: 100%; height: auto; background: #0d1020; }
     .fw-map .radar-loading { height: auto; aspect-ratio: 1100 / 760; }
+    .fw-note {
+      position: relative; overflow: hidden;
+      margin: 0.85rem 0 0; max-width: none;
+      padding: 0.8rem 1rem 0.8rem 1.15rem;
+      font-size: 0.9rem; line-height: 1.5; color: var(--text2);
+      background: var(--glass); border: 1px solid var(--hairline); border-radius: 16px;
+    }
+    .fw-note::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--gradient); }
     .fw-meta { display: flex; justify-content: center; margin: 0 auto 1.25rem; }
     .fw-meta .meta-chip { align-items: center; text-align: center; }
     .fw-meta small { font-size: 0.82rem; font-weight: 500; color: var(--accent); }
@@ -105,6 +113,7 @@
         <img id="map" alt="" hidden />
         <div class="radar-loading" id="msg">Loading maps…</div>
       </figure>
+      <p class="fw-note" id="note" hidden></p>
 
       <p class="pw-footnote">Model guidance only, not an official forecast. Data: NOAA Global Forecast System (0.25°) via AWS Open Data. Use ← → to step through forecast hours.</p>
     </main>
@@ -137,6 +146,8 @@
     const img = $("map");
     img.src = src(product.id, fhr);
     img.alt = `${product.name}, forecast hour ${fhr}`;
+    $("note").textContent = product.note || "";
+    $("note").hidden = !product.note;
     $("hour").value = state.hour;
     $("hourLabel").innerHTML = `F${pad(fhr, 3)}<small>${validTime(fhr)}</small>`;
     document.querySelectorAll("#tabs button").forEach((b, i) =>

@@ -11,6 +11,7 @@ Output:
 import json
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,7 +26,6 @@ import metpy.calc as mpcalc
 import numpy as np
 import requests
 import xarray as xr
-from metpy.units import units
 from scipy.ndimage import gaussian_filter
 
 BUCKET = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
@@ -41,11 +41,26 @@ DATA_CRS = ccrs.PlateCarree()
 OUT = Path(__file__).parent / "site"
 IMG = OUT / "img"
 
+ESTIMATE_NOTE = ("Diagnostic estimate calculated from GFS output, not an official aviation "
+                 "forecast. See aviationweather.gov for operational guidance.")
+
 PRODUCTS = [
     {"id": "precip_mslp", "name": "6-hr Precip & MSLP"},
     {"id": "vort700", "name": "700 mb Vorticity"},
     {"id": "wind200", "name": "200 mb Wind Speed"},
+    {"id": "clouds", "name": "Cloud Cover & Ceiling",
+     "note": "Ceiling is the model's estimate of the lowest broken or overcast cloud base, "
+             "in feet above ground."},
+    {"id": "turb", "name": "Turbulence",
+     "note": "Clear-air turbulence potential from the Ellrod index (TI2), the highest value "
+             "in the 400–200 mb layer (about FL240–FL390). " + ESTIMATE_NOTE},
+    {"id": "icing", "name": "Icing Potential",
+     "note": "Highest icing potential between 900 and 400 mb, from temperature (0 to −22 °C) "
+             "and model cloud liquid water or humidity. " + ESTIMATE_NOTE},
 ]
+
+TURB_LAYERS = [(400, 300), (300, 250), (250, 200)]   # (lower, upper) mb
+ICING_LEVELS = [900, 850, 800, 750, 700, 650, 600, 550, 500, 450, 400]
 
 session = requests.Session()
 
@@ -79,21 +94,19 @@ def read_index(cycle, fhr):
     return entries
 
 
-def get_field(cycle, fhr, index, match):
-    """Download one GRIB message whose index line contains `match`."""
+def byte_range(index, match, fhr):
+    """Byte range of the first GRIB message whose index line contains `match`."""
     for i, (start, desc) in enumerate(index):
         if match in desc:
             end = index[i + 1][0] - 1 if i + 1 < len(index) else ""
-            break
-    else:
-        raise KeyError(f"{match!r} not in F{fhr:03d} index")
+            return start, end
+    raise KeyError(f"{match!r} not in F{fhr:03d} index")
 
-    resp = session.get(file_url(cycle, fhr),
-                       headers={"Range": f"bytes={start}-{end}"}, timeout=120)
-    resp.raise_for_status()
 
+def decode(content):
+    """GRIB message bytes -> CONUS DataArray."""
     with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as f:
-        f.write(resp.content)
+        f.write(content)
         path = f.name
     try:
         ds = xr.open_dataset(path, engine="cfgrib",
@@ -105,6 +118,45 @@ def get_field(cycle, fhr, index, match):
     finally:
         os.remove(path)
     return da
+
+
+def get_fields(cycle, fhr, wanted):
+    """Download {name: index match} fields for one forecast hour.
+
+    Downloads run in parallel; decoding stays on one thread because
+    ecCodes isn't guaranteed to be thread-safe.
+    """
+    index = read_index(cycle, fhr)
+    url = file_url(cycle, fhr)
+
+    def fetch(match):
+        start, end = byte_range(index, match, fhr)
+        resp = session.get(url, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
+        resp.raise_for_status()
+        return resp.content
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        blobs = dict(zip(wanted, pool.map(fetch, wanted.values())))
+    return {name: decode(blob) for name, blob in blobs.items()}
+
+
+def fields_for(fhr):
+    wanted = {
+        "mslp": "PRMSL:mean sea level",
+        "apcp": f"APCP:surface:{fhr - 6}-{fhr} hour acc",
+        "psfc": "PRES:surface:",
+        "zsfc": "HGT:surface:",
+        "tcdc": f"TCDC:entire atmosphere:{fhr} hour fcst",
+        "ceil": "HGT:cloud ceiling:",
+        "frzl": "HGT:0C isotherm:",
+    }
+    for lev in {700, 200} | {lev for pair in TURB_LAYERS for lev in pair}:
+        for var, key in (("HGT", "z"), ("UGRD", "u"), ("VGRD", "v")):
+            wanted[f"{key}{lev}"] = f"{var}:{lev} mb:"
+    for lev in ICING_LEVELS:
+        for var, key in (("TMP", "t"), ("RH", "rh"), ("CLMR", "clw")):
+            wanted[f"{key}{lev}"] = f"{var}:{lev} mb:"
+    return wanted
 
 
 # ---------------------------------------------------------------- plotting
@@ -243,6 +295,142 @@ def plot_wind200(cycle, fhr, f):
            cycle, fhr, IMG / f"wind200_f{fhr:03d}.png")
 
 
+# Shared hazard scale for turbulence and icing: muted teal for low values,
+# then the site's cyan, amber (--err), orange and red (--tornado) for the worst.
+HAZARD_COLORS = ["#2b6f86", "#4ad1ff", "#ffd166", "#ff9f43", "#ff453a"]
+
+
+def hazard_norm(levels):
+    cmap = mcolors.ListedColormap(HAZARD_COLORS[:len(levels) - 1])
+    cmap.set_over("#ffd0e0")
+    return cmap, mcolors.BoundaryNorm(levels, cmap.N)
+
+
+CLOUD_LEVELS = [10, 30, 50, 70, 90, 100]
+CLOUD_CMAP = mcolors.ListedColormap(["#2a3358", "#46507a", "#6f789e", "#a3aac6", "#dfe3f1"])
+CLOUD_NORM = mcolors.BoundaryNorm(CLOUD_LEVELS, CLOUD_CMAP.N)
+
+# Standard flight-category colors, which line up with the site palette.
+CEILING_CATS = [  # (upper bound ft AGL, label, color)
+    (500, "LIFR  < 500 ft", "#e04fd0"),
+    (1000, "IFR  500–999 ft", "#ff453a"),
+    (3000, "MVFR  1,000–3,000 ft", "#4ad1ff"),
+]
+
+
+def plot_clouds(cycle, fhr, f):
+    lon, lat = lonlat(f["tcdc"])
+    ceil = f["ceil"].values
+    # Ceiling is a height above sea level; 20,000 m means no ceiling.
+    ceil_ft = np.where(ceil < 15000, (ceil - f["zsfc"].values) * 3.28084, np.nan)
+
+    fig, ax = new_map()
+    cf = ax.contourf(lon, lat, f["tcdc"].values, levels=CLOUD_LEVELS, cmap=CLOUD_CMAP,
+                     norm=CLOUD_NORM, transform=DATA_CRS, zorder=2)
+    bounds = [0] + [c[0] for c in CEILING_CATS]
+    ax.contourf(lon, lat, ceil_ft, levels=bounds,
+                colors=[c[2] for c in CEILING_CATS], alpha=0.85,
+                transform=DATA_CRS, zorder=2.5)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c[2], alpha=0.85) for c in CEILING_CATS]
+    leg = ax.legend(handles, [c[1] for c in CEILING_CATS], title="Ceiling (AGL)",
+                    loc="lower left", fontsize=8, title_fontsize=8, framealpha=0.85,
+                    facecolor=BG, edgecolor="#2a3156", labelcolor=TEXT)
+    leg.get_title().set_color(TEXT)
+    leg.set_zorder(6)
+    finish(fig, ax, cf, "Total cloud cover (%)", "Total Cloud Cover (%), Low Ceilings",
+           cycle, fhr, IMG / f"clouds_f{fhr:03d}.png")
+
+
+def with_units(da, unit):
+    da = da.copy()
+    da.attrs["units"] = unit
+    return da.metpy.quantify()
+
+
+def ellrod_ti2(f):
+    """Ellrod-Knapp TI2 (10^-7 s^-2): vertical shear x (deformation + convergence).
+
+    Computed for each layer in TURB_LAYERS; the largest value is kept.
+    """
+    best = None
+    for lo, up in TURB_LAYERS:
+        du = f[f"u{up}"].values - f[f"u{lo}"].values
+        dv = f[f"v{up}"].values - f[f"v{lo}"].values
+        dz = f[f"z{up}"].values - f[f"z{lo}"].values
+        vws = np.hypot(du, dv) / dz
+
+        um = with_units((f[f"u{up}"] + f[f"u{lo}"]) / 2, "m/s")
+        vm = with_units((f[f"v{up}"] + f[f"v{lo}"]) / 2, "m/s")
+        deform = mpcalc.total_deformation(um, vm).metpy.dequantify().values
+        conv = -mpcalc.divergence(um, vm).metpy.dequantify().values
+
+        ti2 = vws * (deform + conv) * 1e7
+        best = ti2 if best is None else np.maximum(best, ti2)
+    return gaussian_filter(np.clip(best, 0, None), sigma=1)
+
+
+# The published Ellrod thresholds (4/8/12) were tuned on coarser grids. At 0.25 deg the
+# gradients are sharper and values run about 3x higher, so the scale is shifted up:
+# roughly 10% of CONUS gets any shading and ~1% reaches orange or red.
+TURB_LEVELS = [12, 20, 30, 40, 50, 60]
+
+
+def plot_turb(cycle, fhr, f):
+    lon, lat = lonlat(f["u250"])
+    ti2 = ellrod_ti2(f)
+    jet = gaussian_filter(np.hypot(f["u250"].values, f["v250"].values) * 1.94384, sigma=1)
+
+    fig, ax = new_map()
+    cmap, norm = hazard_norm(TURB_LEVELS)
+    cf = ax.contourf(lon, lat, ti2, levels=TURB_LEVELS, cmap=cmap, norm=norm,
+                     extend="max", transform=DATA_CRS, zorder=2)
+    cs = ax.contour(lon, lat, jet, levels=[70, 90, 110, 130, 150, 170], colors=CONTOUR,
+                    linewidths=0.8, transform=DATA_CRS, zorder=4)
+    ax.clabel(cs, fmt="%d", fontsize=7, inline=True, inline_spacing=2)
+    finish(fig, ax, cf, "Ellrod TI2 (10⁻⁷ s⁻²)   light → moderate → severe",
+           "Turbulence FL240–390, 250 mb Isotachs (kt)",
+           cycle, fhr, IMG / f"turb_f{fhr:03d}.png")
+
+
+def icing_potential(f):
+    """Max over ICING_LEVELS of temperature interest x moisture interest (0-1)."""
+    psfc = f["psfc"].values / 100  # Pa -> hPa
+    best = np.zeros_like(psfc)
+    for lev in ICING_LEVELS:
+        t_c = f[f"t{lev}"].values - 273.15
+        # Supercooled liquid is most likely from about -4 to -14 C.
+        t_score = np.interp(t_c, [-22, -14, -4, 0], [0, 1, 1, 0], left=0, right=0)
+        clw = f[f"clw{lev}"].values * 1000  # kg/kg -> g/kg
+        clw_score = np.interp(clw, [0.01, 0.2], [0, 1])
+        # Humidity alone (no model cloud water) counts for less.
+        rh_score = 0.6 * np.interp(f[f"rh{lev}"].values, [70, 95], [0, 1])
+        pot = t_score * np.maximum(clw_score, rh_score)
+        pot[psfc < lev] = 0  # level is below ground
+        best = np.maximum(best, pot)
+    return gaussian_filter(best, sigma=1)
+
+
+# Humidity-only areas top out at 0.6; amber and above need model cloud liquid water.
+ICING_LEVELS_SHADE = [0.2, 0.4, 0.6, 0.7, 0.85, 1.0]
+
+
+def plot_icing(cycle, fhr, f):
+    lon, lat = lonlat(f["psfc"])
+    pot = icing_potential(f)
+    frz_kft = gaussian_filter(f["frzl"].values * 3.28084 / 1000, sigma=1.5)
+
+    fig, ax = new_map()
+    cmap, norm = hazard_norm(ICING_LEVELS_SHADE)
+    cf = ax.contourf(lon, lat, pot, levels=ICING_LEVELS_SHADE, cmap=cmap, norm=norm,
+                     transform=DATA_CRS, zorder=2)
+    cs = ax.contour(lon, lat, frz_kft, levels=np.arange(2, 17, 2), colors=TEXT2,
+                    linewidths=0.7, linestyles="--", transform=DATA_CRS, zorder=4)
+    ax.clabel(cs, fmt="%d", fontsize=7, inline=True, inline_spacing=2)
+    finish(fig, ax, cf, "Icing potential   low → high",
+           "Icing Potential 900–400 mb, Freezing Level (kft)",
+           cycle, fhr, IMG / f"icing_f{fhr:03d}.png")
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -251,20 +439,13 @@ def main():
     print(f"Using GFS cycle {cycle:%Y-%m-%d %HZ}")
 
     for fhr in FORECAST_HOURS:
-        index = read_index(cycle, fhr)
-        fields = {
-            "mslp": get_field(cycle, fhr, index, "PRMSL:mean sea level"),
-            "apcp": get_field(cycle, fhr, index, f"APCP:surface:{fhr - 6}-{fhr} hour acc"),
-            "z700": get_field(cycle, fhr, index, "HGT:700 mb:"),
-            "u700": get_field(cycle, fhr, index, "UGRD:700 mb:"),
-            "v700": get_field(cycle, fhr, index, "VGRD:700 mb:"),
-            "z200": get_field(cycle, fhr, index, "HGT:200 mb:"),
-            "u200": get_field(cycle, fhr, index, "UGRD:200 mb:"),
-            "v200": get_field(cycle, fhr, index, "VGRD:200 mb:"),
-        }
+        fields = get_fields(cycle, fhr, fields_for(fhr))
         plot_precip_mslp(cycle, fhr, fields)
         plot_vort700(cycle, fhr, fields)
         plot_wind200(cycle, fhr, fields)
+        plot_clouds(cycle, fhr, fields)
+        plot_turb(cycle, fhr, fields)
+        plot_icing(cycle, fhr, fields)
         print(f"  F{fhr:03d} done")
 
     info = {
