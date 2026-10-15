@@ -23,6 +23,8 @@
   <link rel="stylesheet" href="/css/site.css" />
   <style>
     /* FutureWeather-only pieces, built from the shared site tokens. */
+    /* Rules like .radar-loading { display: flex } would otherwise override the hidden attribute. */
+    [hidden] { display: none !important; }
     .fw-tabs {
       display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem;
       margin: 0 auto 1rem;
