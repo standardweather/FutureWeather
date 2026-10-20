@@ -5,8 +5,9 @@ byte offsets in each file's .idx index):
   gfs   Global Forecast System 0.25°, F006–F168 every 6 hours
   nbm   National Blend of Models (the basis of NWS forecasts), F006–F168 every 6 hours
   hrrr  High-Resolution Rapid Refresh 3 km, F001–F048 hourly
+  ecmwf ECMWF IFS 0.25° open data (CC BY 4.0), F006–F168 every 6 hours, from its 00 and 12Z runs
 
-    python make_plots.py gfs        # or nbm, hrrr
+    python make_plots.py gfs        # or nbm, hrrr, ecmwf
 
 Output, per model:
   site/img/<model>/<product>_f<hhh>.png   one transparent overlay per product per forecast hour
@@ -24,6 +25,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -132,6 +134,12 @@ SNOW_LEVELS = [0.1, 0.5, 1, 2, 3, 4, 6, 8, 12, 18, 24]
 SNOW = binned(SNOW_LEVELS, ["#c9e6ff", "#9ccbff", "#6fb0ff", "#4f8dff", "#3f63e0",
                             "#5a3fc4", "#8a3fc4", "#b84fd6", "#e07ae8", "#ffc8f5"])
 
+CAPE_LEVELS = [250, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
+CAPE = binned(CAPE_LEVELS, ["#2b4f6f", "#2f7fa8", "#3fcf9a", "#9be15d", "#f6e33c", "#f2a33a", "#e8532b", "#c41d1d"])
+
+UH_LEVELS = [25, 50, 75, 100, 150, 200, 300]
+UH = binned(UH_LEVELS, ["#4ad1ff", "#8f6bff", "#ffd166", "#ff9f43", "#ff453a", "#ff7ab8"])
+
 # NWS radar colors.
 REFL_LEVELS = list(range(5, 80, 5))
 REFL = binned(REFL_LEVELS, ["#04e9e7", "#019ff4", "#0300f4", "#02fd02", "#01c501", "#008e00", "#fdf802",
@@ -196,15 +204,29 @@ def get_fields(url, wanted, **kw):
     return {name: decode(blob, **kw) for name, blob in blobs.items()}
 
 
-def latest_cycle(url_for, last_hour, every=6):
-    """Newest cycle (00/06/12/18Z) whose last forecast hour has been posted."""
+def latest_cycle(url_for, last_hour, every=6, index_suffix=".idx"):
+    """Newest cycle (00/06/12/18Z, or 00/12Z with every=12) whose last forecast hour has been posted."""
     now = datetime.now(timezone.utc)
     cycle = now.replace(hour=now.hour // every * every, minute=0, second=0, microsecond=0)
     for _ in range(8):
-        if session.head(url_for(cycle, last_hour) + ".idx", timeout=30).status_code == 200:
+        if session.head(index_url(url_for(cycle, last_hour), index_suffix), timeout=30).status_code == 200:
             return cycle
         cycle -= timedelta(hours=every)
     raise RuntimeError("No complete cycle found in the last two days")
+
+
+def index_url(url, suffix):
+    return url + suffix if suffix == ".idx" else url.removesuffix(".grib2") + suffix
+
+
+def get_retry(url, tries=7, **kw):
+    """GET with a few retries; the ECMWF bucket answers bursts with 503 SlowDown."""
+    for i in range(tries):
+        resp = session.get(url, timeout=120, **kw)
+        if resp.status_code not in (429, 500, 503) or i == tries - 1:
+            resp.raise_for_status()
+            return resp
+        time.sleep(min(2 ** (i + 1), 30))
 
 
 # ---------------------------------------------------------------- drawing
@@ -435,7 +457,66 @@ def hrrr_fields(fhr):
         "t2m": f"TMP:2 m above ground:{fhr} hour fcst$",
         "gust": f"GUST:surface:{fhr} hour fcst$",
         "apcp": f"APCP:surface:{fhr - 1}-{fhr} hour acc fcst$",
+        "cape": f"CAPE:surface:{fhr} hour fcst$",
+        "ushr": f"VUCSH:0-6000 m above ground:{fhr} hour fcst$",
+        "vshr": f"VVCSH:0-6000 m above ground:{fhr} hour fcst$",
+        "uh": f"MXUPHL:5000-2000 m above ground:{fhr - 1}-{fhr} hour max fcst$",
     }
+
+
+def hrrr_severe(f, path):
+    """Surface-based CAPE, with 0–6 km bulk shear contoured. HRRR labels the shear 1/s but stores m/s."""
+    x, y = lonlat(f["cape"])
+    shear = gaussian_filter(np.hypot(f["ushr"].values, f["vshr"].values) * 1.94384, sigma=2)
+    fig, ax = new_overlay()
+    shade(ax, x, y, f["cape"].values, CAPE, extend="max")
+    contours(ax, x, y, shear, [30, 40, 50, 60, 70], width=0.8)
+    save(fig, path)
+
+
+# ---------------------------------------------------------------- ECMWF
+
+ECMWF_BUCKET = "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"
+ECMWF_SUBSET = (slice(60, 15), slice(-135, -55))   # open data longitudes run -180-180
+
+
+def ecmwf_url(cycle, fhr):
+    return f"{ECMWF_BUCKET}/{cycle:%Y%m%d}/{cycle:%H}z/ifs/0p25/oper/{cycle:%Y%m%d%H}0000-{fhr}h-oper-fc.grib2"
+
+
+def ecmwf_fields(fhr):
+    """(param, level) pairs. Precipitation is accumulated from the start of the run, so the 6-hour
+    total needs the previous step's file too ("tp_prev")."""
+    wanted = {"mslp": ("msl", None), "tp": ("tp", None), "t2m": ("2t", None)}
+    for lev in (700, 200):
+        for var, key in (("gh", "z"), ("u", "u"), ("v", "v")):
+            wanted[f"{key}{lev}"] = (var, str(lev))
+    return wanted
+
+
+def ecmwf_get(url, wanted, subset=None):
+    """Fields from ECMWF open data, located with the JSON-lines .index next to each file."""
+    def index(u):
+        rows = [json.loads(line) for line in get_retry(index_url(u, ".index")).text.splitlines() if line.startswith("{")]
+        return {(r["param"], r.get("levelist")): (r["_offset"], r["_length"]) for r in rows}
+
+    def fetch(u, idx, key):
+        off, length = idx[key]
+        return get_retry(u, headers={"Range": f"bytes={off}-{off + length - 1}"}).content
+
+    idx = index(url)
+    with ThreadPoolExecutor(max_workers=3) as pool:   # the bucket rate-limits more than a few at once
+        blobs = dict(zip(wanted, pool.map(lambda key: fetch(url, idx, key), wanted.values())))
+    f = {name: decode(blob, subset=subset) for name, blob in blobs.items()}
+    fhr = int(re.search(r"-(\d+)h-oper", url).group(1))
+    prev = url.replace(f"-{fhr}h-oper", f"-{fhr - 6}h-oper")
+    if fhr - 6 > 0:
+        tp_prev = decode(fetch(prev, index(prev), ("tp", None)), subset=subset)
+    else:
+        tp_prev = f["tp"] * 0
+    f["apcp"] = (f["tp"] - tp_prev).clip(min=0) * 1000   # m -> mm, as the GFS drawing expects
+    # Geopotential height arrives in metres (gh), the same as GFS HGT.
+    return f
 
 
 # ---------------------------------------------------------------- models
@@ -484,8 +565,32 @@ MODELS = {
             ("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
             ("precip", "1-hour precip", simple("apcp", PRECIP, lambda v: v / 25.4), legend("1-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
             ("gust", "Wind gusts", simple("gust", GUST, MS_TO_MPH), legend("Wind gust (mph)", GUST_LEVELS, GUST[0])),
+            ("severe", "Instability & shear", hrrr_severe,
+             legend("Surface-based CAPE (J/kg)", CAPE_LEVELS, CAPE[0], lines="White lines: 0–6 km bulk shear (kt)"),
+             "Storms need instability (CAPE) to grow; 40 kt or more of deep-layer shear lets them organize into "
+             "supercells and lines. Ingredients, not a forecast of storms."),
+            ("uh", "Updraft helicity", simple("uh", UH),
+             legend("2–5 km updraft helicity, hourly max (m²/s²)", UH_LEVELS, UH[0]),
+             "Tracks of rotating updrafts in the model's simulated storms. Values above about 75 often mark "
+             "supercells; the exact place and time will differ."),
         ],
         "note": "The HRRR is NOAA's hourly-updated 3 km model. Its 00, 06, 12 and 18Z runs go out 48 hours.",
+    },
+    "ecmwf": {
+        "name": "ECMWF", "long": "ECMWF IFS 0.25°", "source": "ECMWF open data (CC BY 4.0) via AWS",
+        "url": ecmwf_url, "hours": list(range(6, 169, 6)), "fields": ecmwf_fields, "decode": {"subset": ECMWF_SUBSET},
+        "get": ecmwf_get, "every": 12, "index_suffix": ".index",
+        "products": [
+            ("precip_mslp", "Precip & pressure", gfs_precip,
+             legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
+            ("vort700", "700 mb vorticity", gfs_vort700,
+             legend("Relative vorticity (10⁻⁵ s⁻¹)", VORT_LEVELS, VORT[0], lines="White lines: 700 mb heights (dam) · barbs: wind (kt)")),
+            ("wind200", "200 mb jet stream", gfs_wind200,
+             legend("Wind speed (kt)", JET_LEVELS, JET[0], lines="White lines: 200 mb heights (dam) · barbs: wind (kt)")),
+            ("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
+        ],
+        "note": "The European Centre's IFS, often the most accurate global model in the medium range. "
+                "Compare it with the GFS to see how much the two agree. Contains modified Copernicus/ECMWF data (CC BY 4.0).",
     },
 }
 
@@ -495,12 +600,13 @@ def run(model_id):
     hours = m["hours"][: int(os.environ["FW_HOURS"])] if os.environ.get("FW_HOURS") else m["hours"]
     img = OUT / "img" / model_id
     img.mkdir(parents=True, exist_ok=True)
-    cycle = latest_cycle(m["url"], m["hours"][-1])
+    cycle = latest_cycle(m["url"], m["hours"][-1], m.get("every", 6), m.get("index_suffix", ".idx"))
+    get = m.get("get", get_fields)
     print(f"{m['long']}: cycle {cycle:%Y-%m-%d %HZ}")
     done = []
     for fhr in hours:
         try:
-            fields = get_fields(m["url"](cycle, fhr), m["fields"](fhr), **m["decode"])
+            fields = get(m["url"](cycle, fhr), m["fields"](fhr), **m["decode"])
         except Exception as e:   # one bad hour shouldn't sink the run
             print(f"  F{fhr:03d} skipped: {e}")
             continue
