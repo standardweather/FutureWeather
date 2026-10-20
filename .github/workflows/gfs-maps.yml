@@ -1,11 +1,13 @@
 name: FutureWeather maps
 
 on:
-  # GFS 0.25° output through F168 is usually on AWS about 4h20m after each
-  # cycle. These times leave some margin; if a run isn't finished yet, the
-  # script falls back to the previous complete cycle.
+  # GFS 0.25° output through F168 is usually on AWS about 4h20m after each cycle, NBM and the 48-hour
+  # HRRR well before that. These times leave some margin; if a run isn't finished yet, each model
+  # falls back to its previous complete cycle.
   schedule:
     - cron: "50 4,10,16,22 * * *"
+  push:
+    branches: [main]
   workflow_dispatch:   # "Run workflow" button in the Actions tab
 
 permissions:
@@ -18,38 +20,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # One job per model, side by side. A failed model is left out of the page rather than blocking the rest.
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [gfs, nbm, hrrr]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
       - run: pip install -r requirements.txt
-
-      # Cartopy downloads coastline/state shapefiles on first use; keep them.
-      - uses: actions/cache@v4
+      - run: python make_plots.py ${{ matrix.model }}
+      - uses: actions/upload-artifact@v4
         with:
-          path: ~/.local/share/cartopy
-          key: cartopy-naturalearth-v1
-
-      - run: python make_plots.py
-
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
+          name: model-${{ matrix.model }}
+          path: |
+            site/img/${{ matrix.model }}
+            site/models/${{ matrix.model }}.json
+          retention-days: 1
 
   deploy:
     needs: build
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: model-*
+          path: site
+          merge-multiple: true
+      - run: python3 merge_runs.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
       - id: deployment
         uses: actions/deploy-pages@v4

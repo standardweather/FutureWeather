@@ -2,79 +2,46 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FutureWeather | Standard Weather</title>
-  <meta name="description" content="FutureWeather — GFS model forecast maps for the continental U.S., updated after every 00/06/12/18Z run." />
+  <meta name="description" content="FutureWeather — GFS, National Blend of Models and HRRR forecast maps, plus the National Weather Service forecast for any U.S. location." />
   <meta name="theme-color" content="#070914" />
   <link rel="canonical" href="https://standardweather.github.io/FutureWeather/" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://standardweather.github.io/FutureWeather/" />
   <meta property="og:title" content="FutureWeather | Standard Weather" />
-  <meta property="og:description" content="GFS model forecast maps for the continental U.S., updated every 6 hours." />
+  <meta property="og:description" content="GFS, NBM and HRRR forecast maps and point forecasts for the U.S." />
   <meta property="og:image" content="https://standardweather.github.io/logo.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png" />
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png" />
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
   <meta name="color-scheme" content="dark" />
-  <!-- Shared theme from the main site (standardweather.github.io repo). -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Shared theme and console layout from the main site (standardweather.github.io repo). -->
   <link rel="stylesheet" href="/css/site.css" />
+  <link rel="stylesheet" href="/css/console.css?v=1" />
   <style>
-    /* FutureWeather-only pieces, built from the shared site tokens. */
-    /* Rules like .radar-loading { display: flex } would otherwise override the hidden attribute. */
-    [hidden] { display: none !important; }
-    .fw-tabs {
-      display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem;
-      margin: 0 auto 1rem;
-    }
-    .fw-tabs .btn--secondary[aria-pressed="true"] {
-      background: rgba(74, 209, 255, 0.14);
-      border-color: rgba(74, 209, 255, 0.45);
-      color: #fff;
-    }
-    .fw-controls {
-      display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 0.75rem;
-      padding: 0.75rem 0.9rem; margin-bottom: 1rem;
-      background: var(--glass);
-      -webkit-backdrop-filter: blur(24px) saturate(1.3);
-      backdrop-filter: blur(24px) saturate(1.3);
-      border: 1px solid var(--hairline);
-      border-radius: var(--radius);
-      box-shadow: 0 8px 36px rgba(0, 0, 0, 0.35);
-    }
-    .fw-controls .btn--secondary { min-width: 2.75rem; padding: 0 0.9rem; }
-    /* site.css restyles every input as a text field; give the slider its native look back. */
-    .fw-controls input[type="range"] {
-      flex: 1 1 12rem; width: auto; padding: 0; border: 0; background: none;
-      appearance: auto; -webkit-appearance: auto; accent-color: var(--accent); box-shadow: none;
-    }
-    .fw-hour {
-      min-width: 9.5rem; text-align: right; font-weight: 600; color: #fff;
-      font-variant-numeric: tabular-nums;
-    }
-    .fw-hour small { display: block; font-weight: 500; font-size: 0.78rem; color: var(--accent); }
-    .fw-map img { display: block; width: 100%; height: auto; background: #0d1020; }
-    .fw-map .radar-loading { height: auto; aspect-ratio: 1100 / 760; }
-    .fw-note {
-      position: relative; overflow: hidden;
-      margin: 0.85rem 0 0; max-width: none;
-      padding: 0.8rem 1rem 0.8rem 1.15rem;
-      font-size: 0.9rem; line-height: 1.5; color: var(--text2);
-      background: var(--glass); border: 1px solid var(--hairline); border-radius: 16px;
-    }
-    .fw-note::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--gradient); }
-    .fw-meta { display: flex; justify-content: center; margin: 0 auto 1.25rem; }
-    .fw-meta .meta-chip { align-items: center; text-align: center; }
-    .fw-meta small { font-size: 0.82rem; font-weight: 500; color: var(--accent); }
-    .fw-meta small:empty { display: none; }
-    @media (max-width: 639px) {
-      .fw-hour { text-align: left; min-width: 0; flex: 1 0 100%; }
-    }
+    /* FutureWeather-only pieces; the shared console layout is in /css/console.css. */
+    .prod { all: unset; box-sizing: border-box; display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; width: 100%; padding: 0.55rem 1.25rem;
+      border: 0; border-top: 1px solid var(--rule); background: none; color: var(--text2); font: 500 0.88rem var(--font); text-align: left; cursor: pointer; }
+    .prod:hover, .prod:active { transform: none; filter: none; background: rgba(255, 255, 255, 0.03); color: #fff; }
+    .prod[aria-pressed="true"] { color: #fff; background: rgba(74, 209, 255, 0.07); box-shadow: inset 3px 0 0 var(--accent); }
+    .prod small { font: 0.72rem var(--mono); color: var(--text3); }
+    .bins { display: flex; height: 0.55rem; border-radius: 2px; overflow: hidden; margin-top: 0.35rem; }
+    .bins i { flex: 1; }
+    .bins + .ticks { position: relative; height: 0.9rem; font: 0.68rem var(--mono); color: var(--text3); margin-top: 0.15rem; }
+    .bins + .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+    .maplegend { width: 15rem; }
+    .bins + .ticks { margin: 0.15rem 0.5rem 0; }
+    .maplegend .lines { margin: 0.35rem 0 0; font-size: 0.7rem; color: var(--text3); max-width: 15rem; }
+    .scrub .when { min-width: 9.5rem; text-align: right; }
+    .scrub .when small { display: block; color: var(--text3); font: 0.7rem var(--mono); }
   </style>
 </head>
-<body>
+<body class="console">
   <nav class="site-nav" aria-label="Primary">
     <div class="site-nav__inner">
       <a class="site-nav__brand" href="/">
@@ -93,134 +60,38 @@
     </div>
   </nav>
 
-  <div class="shell shell--wide">
-    <header class="pw-brand">
-      <h1 class="name"><span class="past">Future</span><span class="weather">Weather</span></h1>
-    </header>
-    <p class="pw-helper">GFS model forecast maps for the continental U.S., refreshed after every 00, 06, 12 and 18Z run.</p>
-
-    <div class="fw-meta">
-      <span class="meta-chip" id="run">Loading latest run…<small id="updated"></small></span>
-    </div>
-
-    <main>
-      <div class="fw-tabs" id="tabs" role="group" aria-label="Map product"></div>
-
-      <div class="fw-controls">
-        <button class="btn btn--secondary" id="prev" aria-label="Previous forecast hour">◀</button>
-        <button class="btn btn--secondary" id="play">▶ Play</button>
-        <button class="btn btn--secondary" id="next" aria-label="Next forecast hour">▶</button>
-        <input id="hour" type="range" min="0" max="0" value="0" aria-label="Forecast hour" />
-        <span class="fw-hour" id="hourLabel"></span>
+  <div class="app">
+    <aside class="side" aria-label="Forecast">
+      <div class="side__head"><h1><span>Future</span>Weather</h1><time id="run"></time></div>
+      <div class="tabs" role="tablist" aria-label="View" id="views">
+        <button role="tab" data-view="maps" aria-selected="true">Model maps</button>
+        <button role="tab" data-view="forecast" aria-selected="false">Point forecast</button>
       </div>
+      <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
+      <div class="side__foot">
+        <div class="satpick" id="models" role="group" aria-label="Model"><span>Model</span></div>
+        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, National Blend of Models and HRRR via AWS Open Data; point forecasts from the National Weather Service.</p>
+      </div>
+    </aside>
 
-      <figure class="panel fw-map" style="margin: 0">
-        <img id="map" alt="" hidden />
-        <div class="radar-loading" id="msg">Loading maps…</div>
-      </figure>
-      <p class="fw-note" id="note" hidden></p>
-
-      <p class="pw-footnote">Model guidance only, not an official forecast. Data: NOAA Global Forecast System (0.25°) via AWS Open Data. Use ← → to step through forecast hours.</p>
-    </main>
+    <section class="stage" aria-label="Map">
+      <div id="map"></div>
+      <div class="status" id="status" hidden></div>
+      <div class="scrub" id="scrub">
+        <button id="prev" aria-label="Previous forecast hour">◀</button>
+        <button id="play" aria-label="Play">▶</button>
+        <button id="next" aria-label="Next forecast hour">▶</button>
+        <input type="range" id="hour" min="0" max="0" value="0" aria-label="Forecast hour" />
+        <b class="when" id="hourLabel"></b>
+      </div>
+    </section>
   </div>
 
   <footer class="site-footer">
-    <p>&copy; 2026 Standard Weather Forensics &amp; Consulting</p>
+    <p>&copy; 2026 Standard Weather Forensics &amp; Consulting · Model guidance only, not an official forecast.</p>
   </footer>
 
-<script>
-  const state = { info: null, product: 0, hour: 0, timer: null };
-  const $ = (id) => document.getElementById(id);
-  const pad = (n, w = 2) => String(n).padStart(w, "0");
-
-  function src(productId, fhr) {
-    // The cycle in the query string stops browsers showing a cached older run.
-    return `img/${productId}_f${pad(fhr, 3)}.png?run=${encodeURIComponent(state.info.cycle)}`;
-  }
-
-  function validTime(fhr) {
-    const t = new Date(new Date(state.info.init).getTime() + fhr * 3600e3);
-    const day = t.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
-    return `${day} ${pad(t.getUTCHours())}Z`;
-  }
-
-  function render() {
-    const { info } = state;
-    const product = info.products[state.product];
-    const fhr = info.hours[state.hour];
-    const img = $("map");
-    img.src = src(product.id, fhr);
-    img.alt = `${product.name}, forecast hour ${fhr}`;
-    $("note").textContent = product.note || "";
-    $("note").hidden = !product.note;
-    $("hour").value = state.hour;
-    $("hourLabel").innerHTML = `F${pad(fhr, 3)}<small>${validTime(fhr)}</small>`;
-    document.querySelectorAll("#tabs button").forEach((b, i) =>
-      b.setAttribute("aria-pressed", i === state.product));
-  }
-
-  function step(delta) {
-    const n = state.info.hours.length;
-    state.hour = (state.hour + delta + n) % n;
-    render();
-  }
-
-  function togglePlay(force) {
-    const playing = force ?? !state.timer;
-    clearInterval(state.timer);
-    state.timer = playing ? setInterval(() => step(1), 700) : null;
-    $("play").textContent = playing ? "❚❚ Pause" : "▶ Play";
-  }
-
-  function preload() {
-    const product = state.info.products[state.product];
-    state.info.hours.forEach((h) => { new Image().src = src(product.id, h); });
-  }
-
-  async function init() {
-    try {
-      const res = await fetch(`data.json?t=${Date.now()}`, { cache: "no-store" });
-      if (!res.ok) throw new Error(res.status);
-      state.info = await res.json();
-    } catch (e) {
-      $("run").firstChild.textContent = "No model run published yet";
-      $("msg").textContent = "Maps will appear after the first model run is processed.";
-      return;
-    }
-    const { info } = state;
-    const init = new Date(info.init);
-    $("run").firstChild.textContent =
-      `${info.model} · ${init.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })} ${pad(init.getUTCHours())}Z run`;
-    const gen = new Date(info.generated);
-    $("updated").textContent =
-      `Updated ${gen.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`;
-
-    info.products.forEach((p, i) => {
-      const b = document.createElement("button");
-      b.className = "btn btn--secondary";
-      b.textContent = p.name;
-      b.onclick = () => { state.product = i; render(); preload(); };
-      $("tabs").appendChild(b);
-    });
-
-    $("hour").max = info.hours.length - 1;
-    $("hour").oninput = (e) => { togglePlay(false); state.hour = +e.target.value; render(); };
-    $("prev").onclick = () => { togglePlay(false); step(-1); };
-    $("next").onclick = () => { togglePlay(false); step(1); };
-    $("play").onclick = () => togglePlay();
-    document.addEventListener("keydown", (e) => {
-      if (e.target.matches("input, textarea")) return;
-      if (e.key === "ArrowLeft") { togglePlay(false); step(-1); }
-      if (e.key === "ArrowRight") { togglePlay(false); step(1); }
-    });
-
-    $("map").onload = () => { $("map").hidden = false; $("msg").hidden = true; };
-    $("map").onerror = () => { $("map").hidden = true; $("msg").hidden = false; $("msg").textContent = "This map isn't available."; };
-    render();
-    preload();
-  }
-
-  init();
-</script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
