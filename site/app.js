@@ -1,7 +1,8 @@
 /* FutureWeather — model forecast console for standardweather.github.io.
  *
- *   Model maps    GFS, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions)
- *   NWS API       7-day and hourly forecasts for any U.S. point (api.weather.gov)
+ *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions)
+ *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram (api.weather.gov)
+ *   WPC           7-day rainfall forecast and excessive rainfall outlooks (NOAA map services, drawn live)
  *   Census TIGERweb / Geocoder, USGS GNIS   place search
  */
 (() => {
@@ -19,6 +20,7 @@
     info: null, model: 0, product: null, hour: 0, timer: null,
     view: params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
     point: null, pointError: null, openPeriod: null, query: "",
+    compare: params.get("compare") === "1", wpc: { qpf: false, ero: false, eroDay: 0 },
   };
 
   // —— Map ————————————————————————————————————————————————————————
@@ -57,7 +59,96 @@
     };
     img.onerror = () => { if (want === url) setStatus("This map isn't available."); };
     img.src = url;
+    drawCompare();
   }
+
+  // —— Compare: GFS and ECMWF side by side, at the same valid time ————————————————
+  const COMPARE = { gfs: "ecmwf", ecmwf: "gfs" };
+  let map2 = null, overlay2 = null, syncing = false;
+  /** The other model of the pair, when it has this product. */
+  function partner() {
+    const other = state.info?.models.find((x) => x.id === COMPARE[model().id]);
+    return other && other.products.some((p) => p.id === product().id) ? other : null;
+  }
+  function nearestHour(m, t) {
+    let best = m.hours[0];
+    m.hours.forEach((h) => { if (Math.abs(validAt(m, h) - t) < Math.abs(validAt(m, best) - t)) best = h; });
+    return best;
+  }
+  function drawCompare() {
+    const other = state.compare ? partner() : null;
+    $("map").parentElement.classList.toggle("split", !!other);
+    $("tag1").hidden = $("tag2").hidden = !other;
+    if (!other) { if (map2) setTimeout(() => map.invalidateSize(), 0); return; }
+    if (!map2) {
+      map2 = L.map("map2", { zoomControl: false, attributionControl: false, minZoom: 3, maxZoom: 10, zoomSnap: 0.5 });
+      map2.createPane("model").style.zIndex = 350;
+      map2.createPane("labels").style.zIndex = 640;
+      map2.getPane("labels").style.pointerEvents = "none";
+      L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16 }).addTo(map2);
+      L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, pane: "labels", opacity: 0.85 }).addTo(map2);
+      const follow = (from, to) => from.on("move", () => { if (syncing) return; syncing = true; to.setView(from.getCenter(), from.getZoom(), { animate: false }); syncing = false; });
+      follow(map, map2);
+      follow(map2, map);
+      map2.on("click", (e) => map.fire("click", e));
+    }
+    setTimeout(() => { map.invalidateSize(); map2.invalidateSize(); map2.setView(map.getCenter(), map.getZoom(), { animate: false }); }, 0);
+    const m = model(), t = validAt(m, m.hours[state.hour]), h2 = nearestHour(other, t);
+    const url = imgUrl(other, product().id, h2);
+    if (!overlay2) overlay2 = L.imageOverlay(url, state.info.bounds, { pane: "model", opacity: 0.78, interactive: false }).addTo(map2);
+    else overlay2.setUrl(url);
+    const tag = (x, h) => `${x.name} ${pad(new Date(x.init).getUTCHours())}Z · F${pad(h, 3)}`;
+    $("tag1").textContent = tag(m, m.hours[state.hour]);
+    $("tag2").textContent = tag(other, h2) + (validAt(other, h2) !== t ? " (nearest)" : "");
+  }
+
+  // —— WPC rainfall overlays (live from NOAA map services) ——————————————————————
+  const WPC_QPF = "https://mapservices.weather.noaa.gov/vector/rest/services/precip/wpc_qpf/MapServer";
+  const WPC_ERO = "https://mapservices.weather.noaa.gov/vector/rest/services/hazards/wpc_precip_hazards/MapServer";
+  map.createPane("wpc").style.zIndex = 360;
+  map.getPane("wpc").style.pointerEvents = "none";
+  const ExportLayer = L.TileLayer.extend({
+    getTileUrl(c) {
+      const size = this.getTileSize();
+      const a = L.CRS.EPSG3857.project(map.unproject([c.x * size.x, c.y * size.y], c.z));
+      const b = L.CRS.EPSG3857.project(map.unproject([(c.x + 1) * size.x, (c.y + 1) * size.y], c.z));
+      return `${this.options.base}/export?bbox=${a.x},${b.y},${b.x},${a.y}&bboxSR=3857&imageSR=3857&size=${size.x},${size.y}&layers=show:${this.options.ids}&format=png32&transparent=true&dpi=96&f=image&_=${Math.floor(Date.now() / 1800e3)}`;
+    },
+  });
+  const wpcLayers = {};
+  const wpcLegends = {};
+  const WpcLegend = L.Control.extend({ options: { position: "topleft" }, onAdd() { const d = L.DomUtil.create("div", "maplegend"); d.id = "wpcLegend"; return d; } });
+  new WpcLegend().addTo(map);
+  async function drawWpc() {
+    const want = { qpf: state.wpc.qpf && [WPC_QPF, 11], ero: state.wpc.ero && [WPC_ERO, state.wpc.eroDay] };
+    for (const k of ["qpf", "ero"]) {
+      wpcLayers[k]?.remove();
+      delete wpcLayers[k];
+      if (want[k]) wpcLayers[k] = new ExportLayer("", { base: want[k][0], ids: want[k][1], pane: "wpc", opacity: k === "qpf" ? 0.65 : 0.55, attribution: "" }).addTo(map);
+    }
+    if (!wpcLayers.qpf && !wpcLayers.ero) map.attributionControl.removeAttribution("WPC");
+    else map.attributionControl.addAttribution("WPC");
+    $("eroDay").hidden = !state.wpc.ero;
+    const parts = [];
+    for (const k of ["qpf", "ero"]) {
+      if (!want[k]) continue;
+      const [base, id] = want[k];
+      wpcLegends[base] ||= fetch(`${base}/legend?f=json`).then((r) => r.json()).then((d) => Object.fromEntries(d.layers.map((l) => [l.layerId, l]))).catch(() => ({}));
+      const lg = (await wpcLegends[base])[id];
+      const items = (lg?.legend || []).filter((x) => x.label !== "0");
+      parts.push(`<h5 class="sub">${k === "qpf" ? "WPC rainfall, next 7 days (in)" : `Excessive rainfall risk, day ${state.wpc.eroDay + 1}`}</h5><div class="key">${(k === "qpf" ? items.slice().reverse() : items).map((x) =>
+        `<span><img alt="" src="data:${x.contentType};base64,${x.imageData}" width="12" height="12" style="vertical-align:-2px;margin-right:.3rem">${esc((x.label || "").replace(" (inches)", "").replace(/ \(At Least (\d+)%\)/, " ($1%+)"))}</span>`).join("")}</div>`);
+    }
+    $("wpcLegend").innerHTML = parts.join("");
+  }
+  $("overlays").addEventListener("change", (e) => { const k = e.target.dataset.wpc; if (k) { state.wpc[k] = e.target.checked; drawWpc(); } });
+  $("eroDay").addEventListener("click", (e) => {
+    const d = e.target.closest("[data-day]")?.dataset.day;
+    if (d == null) return;
+    state.wpc.eroDay = +d;
+    document.querySelectorAll("#eroDay [data-day]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.day === d));
+    drawWpc();
+  });
 
   function preload() {
     const m = model(), p = product();
@@ -72,7 +163,8 @@
     if (!lg) { $("legend").innerHTML = ""; return; }
     const n = lg.colors.length;
     // Label every edge when there's room, otherwise every second or third.
-    const every = n > 18 ? 6 : n > 10 ? 2 : 1;
+    const wide = lg.levels.some((v) => String(v).length >= 4);
+    const every = n > 18 ? 6 : n > 10 || (wide && n > 6) ? 2 : 1;
     const ticks = lg.levels.map((v, i) => (i % every === 0 ? `<span style="left:${(i / n) * 100}%">${v}</span>` : "")).join("");
     $("legend").innerHTML = `<h5 class="sub">${esc(lg.label)}</h5>
       <div class="bins">${lg.colors.map((c) => `<i style="background:${c}"></i>`).join("")}</div><div class="ticks">${ticks}</div>
@@ -134,6 +226,7 @@
     q.set("f", model().hours[state.hour]);
     if (state.point?.lat != null) q.set("loc", `${state.point.lat.toFixed(3)},${state.point.lon.toFixed(3)}`);
     if (state.view === "forecast") q.set("view", "forecast");
+    if (state.compare) q.set("compare", "1");
     history.replaceState(null, "", `?${q}`);
   }
 
@@ -147,6 +240,7 @@
         <h5 class="sub">${esc(m.long)} · ${dayZ(m.init)} run</h5>
         <p class="note" style="margin-top:0">${m.hours.length} forecast hours, F${pad(m.hours[0], 3)}–F${pad(m.hours[m.hours.length - 1], 3)}. Processed ${esc(gen.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }))}.
           ${m.note ? esc(m.note) : ""}</p>
+        ${partner() ? `<p class="note"><button class="linkish" data-compare="1">${state.compare ? "Close the side-by-side view" : `Compare with ${esc(partner().name)} side by side`}</button></p>` : ""}
         <p class="note">Click anywhere on the map for the National Weather Service forecast there. Use ← → to step through hours.</p>
       </div>`;
   }
@@ -162,8 +256,81 @@
       <table class="t" style="margin-top:.6rem"><tbody>${f.periods.map((p, i) => `<tr data-period="${i}" style="cursor:pointer"><td style="width:6.5rem"><b style="color:#fff">${esc(p.name)}</b><small>${p.probabilityOfPrecipitation?.value ? `${p.probabilityOfPrecipitation.value}% precip` : ""}</small></td>
         <td style="width:3rem;color:${p.isDaytime ? "#ffbf47" : "#7cb8ff"}">${p.temperature}°</td><td>${esc(p.shortForecast)}<small>${esc(p.windDirection)} ${esc(p.windSpeed)}</small>
         ${state.openPeriod === i ? `<small style="color:var(--text2);margin-top:.3rem">${esc(p.detailedForecast)}</small>` : ""}</td></tr>`).join("")}</tbody></table>
+      <h5 class="sub" style="margin-top:1rem">7-day meteogram</h5>
+      ${f.grid ? meteogram(f.grid) : `<p class="note">Loading the forecast grid…</p>`}
       <p class="note">The NWS forecast starts from the National Blend of Models, adjusted by local forecasters. Tap a day for details.
         <a href="${esc(f.link)}" target="_blank" rel="noopener">Full forecast at weather.gov ↗</a></p></div>`;
+  }
+
+  /** Hourly series from the NWS forecast grid ("2026-10-20T18:00:00+00:00/PT3H" intervals spread over each hour). */
+  function gridSeries(prop, convert = (v) => v, spread = false) {
+    const out = new Map();
+    for (const { validTime, value } of prop?.values || []) {
+      if (value == null) continue;
+      const [start, dur] = validTime.split("/");
+      const m = dur.match(/P(?:(\d+)D)?T?(?:(\d+)H)?/);
+      const hours = Math.max(1, (+(m?.[1] || 0)) * 24 + (+(m?.[2] || 0)));
+      const t0 = Date.parse(start);
+      for (let i = 0; i < hours; i++) out.set(t0 + i * 3600e3, convert(spread ? value / hours : value));
+    }
+    return out;
+  }
+  function meteogram(g) {
+    const now = Math.floor(Date.now() / 3600e3) * 3600e3, end = now + 7 * 86400e3;
+    const hours = [];
+    for (let t = now; t < end; t += 3600e3) hours.push(t);
+    const val = (s, t) => (s.has(t) ? s.get(t) : null);
+    const W = 336, L0 = 28, R0 = 8, PH = 70, GAP = 16, TOP = 6;
+    const x = (t) => L0 + ((t - now) / (end - now)) * (W - L0 - R0);
+    const mono = 'font-family="IBM Plex Mono, monospace" font-size="9" fill="rgba(255,255,255,.42)"';
+    let svg = "";
+    const panel = (i, lo, hi, step, unit) => {
+      const top = TOP + i * (PH + GAP), y = (v) => top + (1 - (v - lo) / (hi - lo)) * PH;
+      for (let v = lo; v <= hi; v += step) svg += `<line x1="${L0}" x2="${W - R0}" y1="${y(v)}" y2="${y(v)}" stroke="rgba(255,255,255,.07)"/><text x="${L0 - 4}" y="${y(v) + 3}" text-anchor="end" ${mono}>${v}${unit}</text>`;
+      return y;
+    };
+    const line = (s, y, color, w = 1.6) => {
+      let d = "", pen = false;
+      hours.forEach((t) => { const v = val(s, t); if (v == null) { pen = false; return; } d += `${pen ? "L" : "M"}${x(t).toFixed(1)},${y(v).toFixed(1)}`; pen = true; });
+      return d ? `<path d="${d}" fill="none" stroke="${color}" stroke-width="${w}"/>` : "";
+    };
+    // Panel 1: temperature and dew point.
+    const temps = [...hours.map((t) => val(g.temp, t)), ...hours.map((t) => val(g.dew, t))].filter((v) => v != null);
+    if (!temps.length) return `<p class="note">No forecast grid for this spot.</p>`;
+    const tlo = Math.floor((Math.min(...temps) - 2) / 10) * 10, thi = Math.ceil((Math.max(...temps) + 2) / 10) * 10;
+    const y1 = panel(0, tlo, thi, thi - tlo > 40 ? 20 : 10, "°");
+    svg += line(g.dew, y1, "#3fcf9a", 1.2) + line(g.temp, y1, "#ffbf47");
+    // Panel 2: wind and gusts.
+    const winds = hours.map((t) => Math.max(val(g.wind, t) ?? 0, val(g.gust, t) ?? 0));
+    const whi = Math.max(20, Math.ceil(Math.max(...winds) / 10) * 10);
+    const y2 = panel(1, 0, whi, whi > 40 ? 20 : 10, "");
+    svg += line(g.gust, y2, "#ff9548", 1.1) + line(g.wind, y2, "rgba(255,255,255,.75)");
+    // Panel 3: precipitation chance (bars) and amount per 6 hours (labels), sky cover (shading).
+    const top3 = TOP + 2 * (PH + GAP), y3 = (v) => top3 + (1 - v / 100) * PH;
+    [0, 50, 100].forEach((v) => { svg += `<line x1="${L0}" x2="${W - R0}" y1="${y3(v)}" y2="${y3(v)}" stroke="rgba(255,255,255,.07)"/><text x="${L0 - 4}" y="${y3(v) + 3}" text-anchor="end" ${mono}>${v}%</text>`; });
+    svg += line(g.sky, y3, "rgba(200,210,240,.35)", 1);
+    const bw = (W - L0 - R0) / hours.length;
+    hours.forEach((t) => { const p = val(g.pop, t); if (p) svg += `<rect x="${x(t).toFixed(1)}" y="${y3(p).toFixed(1)}" width="${bw.toFixed(2)}" height="${(top3 + PH - y3(p)).toFixed(1)}" fill="rgba(74,209,255,.4)"/>`; });
+    let total = 0;
+    // Day ticks and daily rain totals.
+    const day0 = new Date(now); day0.setHours(24, 0, 0, 0);
+    for (let t = day0.getTime() - 86400e3; t < end; t += 86400e3) {
+      let sum = 0;
+      for (let h = Math.max(t, now); h < Math.min(t + 86400e3, end); h += 3600e3) sum += val(g.qpf, h) ?? 0;
+      total += sum;
+      if (t >= now) svg += `<line x1="${x(t)}" x2="${x(t)}" y1="${TOP}" y2="${top3 + PH}" stroke="rgba(255,255,255,.12)"/>`;
+      const mid = x(Math.max(t, now) + (Math.min(t + 86400e3, end) - Math.max(t, now)) / 2);
+      if (Math.min(t + 86400e3, end) - Math.max(t, now) >= 8 * 3600e3) {
+        svg += `<text x="${mid.toFixed(1)}" y="${top3 + PH + 11}" text-anchor="middle" ${mono}>${new Date(Math.max(t, now) + 3600e3).toLocaleDateString("en-US", { weekday: "short" })}</text>`;
+        if (sum >= 0.01) svg += `<text x="${mid.toFixed(1)}" y="${top3 + 9}" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="8.5" fill="#4ad1ff">${sum.toFixed(2)}"</text>`;
+      }
+    }
+    const H = top3 + PH + 16;
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Seven-day meteogram">${svg}</svg>
+      <p class="chart-key"><span style="color:#ffbf47">━</span> temp <span style="color:#3fcf9a">━</span> dew point (°F) ·
+        <span style="color:rgba(255,255,255,.75)">━</span> wind <span style="color:#ff9548">━</span> gusts (mph) ·
+        <span style="color:#4ad1ff">▮</span> precip chance, daily rain (in) <span style="color:rgba(200,210,240,.6)">━</span> sky cover · local days</p>
+      <p class="note" style="margin-top:.2rem">7-day rain total ${total.toFixed(2)}".</p>`;
   }
 
   function hourlyChart(h) {
@@ -201,6 +368,7 @@
     if (v === "forecast" && !state.point) $("q")?.focus();
   });
   $("panel").addEventListener("click", (e) => {
+    if (e.target.closest("[data-compare]")) { state.compare = !state.compare; drawCompare(); render(); syncUrl(); return; }
     const b = e.target.closest("[data-product], [data-period]");
     if (!b) return;
     if (b.dataset.product) { state.product = b.dataset.product; drawLegend(); drawHour(); preload(); render(); return; }
@@ -251,7 +419,21 @@
         place: rel ? `${rel.city}, ${rel.state}` : `${lat.toFixed(2)}, ${lon.toFixed(2)}`,
         link: `https://forecast.weather.gov/MapClick.php?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`,
         updated: daily.properties?.updateTime, periods: daily.properties?.periods || [], hourly: (hourly?.properties?.periods || []).slice(0, 48),
+        grid: null,
       };
+      const pt = state.point;
+      try { localStorage.setItem("sw-place", JSON.stringify({ label: state.query && !parseLatLon(state.query) ? state.query : pt.place, lat, lon })); } catch { /* private mode */ }
+      fetch(pr.forecastGridData).then((r) => r.json()).then((d) => {
+        if (state.point !== pt) return;
+        const p = d.properties, f2c = (c) => c * 9 / 5 + 32, kmh = (v) => v / 1.60934;
+        pt.grid = {
+          temp: gridSeries(p.temperature, f2c), dew: gridSeries(p.dewpoint, f2c),
+          wind: gridSeries(p.windSpeed, kmh), gust: gridSeries(p.windGust, kmh),
+          sky: gridSeries(p.skyCover), pop: gridSeries(p.probabilityOfPrecipitation),
+          qpf: gridSeries(p.quantitativePrecipitation, (mm) => mm / 25.4, true),
+        };
+        if (state.view === "forecast") render();
+      }).catch(() => { if (state.point === pt) { pt.grid = { temp: new Map(), dew: new Map() }; if (state.view === "forecast") render(); } });
     } catch (err) {
       state.point = null;
       state.pointError = err.message;
@@ -398,6 +580,10 @@
     if (loc.length === 2 && loc.every(Number.isFinite)) {
       map.setView(loc, 6, { animate: false });
       showForecast(loc[0], loc[1]);
+    } else {
+      // Offer the place last used on any Standard Weather page.
+      try { const saved = JSON.parse(localStorage.getItem("sw-place") || "null"); if (saved?.label) state.query = saved.label; } catch { /* none saved */ }
+      render();
     }
   }
 

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SITE = Path(__file__).parent / "site"
-ORDER = ["gfs", "nbm", "hrrr"]
+ORDER = ["gfs", "ecmwf", "nbm", "hrrr"]
 # Must match BOUNDS in make_plots.py: [[south, west], [north, east]].
 BOUNDS = [[20.0, -130.0], [54.0, -60.0]]
 

@@ -38,6 +38,16 @@
     .bins + .ticks { margin: 0.15rem 0.5rem 0; }
     .maplegend .lines { margin: 0.35rem 0 0; font-size: 0.7rem; color: var(--text3); max-width: 15rem; }
     .scrub .when { min-width: 9.5rem; text-align: right; }
+    /* Side-by-side compare: a second synced map on the right half. */
+    .stage.split #map { right: 50%; }
+    #map2 { display: none; background: #0b1022; position: absolute; top: 0; bottom: 0; right: 0; left: 50%; border-left: 1px solid var(--rule); }
+    .stage.split #map2 { display: block; }
+    .maptag { position: absolute; z-index: 800; top: 0.6rem; padding: 0.2rem 0.55rem; border-radius: 6px; background: rgba(8, 10, 24, 0.85);
+      border: 1px solid var(--rule); font: 500 0.78rem var(--mono); color: #fff; pointer-events: none; }
+    #tag1 { right: calc(50% + 3.4rem); } #tag2 { right: 3.4rem; }
+    .linkish { all: unset; cursor: pointer; color: var(--accent); font-size: 0.82rem; }
+    .linkish:hover { text-decoration: underline; }
+    .side__foot .checks { margin-bottom: 0.4rem; }
     .scrub .when small { display: block; color: var(--text3); font: 0.7rem var(--mono); }
   </style>
 </head>
@@ -69,13 +79,21 @@
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
       <div class="side__foot">
+        <h4>WPC overlays</h4>
+        <div class="checks" id="overlays">
+          <label><input type="checkbox" data-wpc="qpf" /> Rain, 7 days</label>
+          <label><input type="checkbox" data-wpc="ero" /> Flash flood risk</label>
+        </div>
+        <div class="satpick" id="eroDay" role="group" aria-label="Excessive rainfall outlook day" hidden><span>Risk day</span><button data-day="0" aria-pressed="true">1</button><button data-day="1" aria-pressed="false">2</button><button data-day="2" aria-pressed="false">3</button><button data-day="3" aria-pressed="false">4</button><button data-day="4" aria-pressed="false">5</button></div>
         <div class="satpick" id="models" role="group" aria-label="Model"><span>Model</span></div>
-        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, National Blend of Models and HRRR via AWS Open Data; point forecasts from the National Weather Service.</p>
+        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC outlooks; point forecasts from the National Weather Service.</p>
       </div>
     </aside>
 
     <section class="stage" aria-label="Map">
       <div id="map"></div>
+      <div id="map2" aria-label="Comparison map"></div>
+      <div class="maptag" id="tag1" hidden></div><div class="maptag" id="tag2" hidden></div>
       <div class="status" id="status" hidden></div>
       <div class="scrub" id="scrub">
         <button id="prev" aria-label="Previous forecast hour">◀</button>
@@ -92,6 +110,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
