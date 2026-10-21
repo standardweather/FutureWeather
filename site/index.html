@@ -79,14 +79,18 @@
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
       <div class="side__foot">
-        <h4>WPC overlays</h4>
+        <h4>Outlooks</h4>
         <div class="checks" id="overlays">
           <label><input type="checkbox" data-wpc="qpf" /> Rain, 7 days</label>
           <label><input type="checkbox" data-wpc="ero" /> Flash flood risk</label>
+          <label><input type="checkbox" data-wpc="spc" /> Severe storms</label>
+          <label><input type="checkbox" data-wpc="cpc" /> Temperature and rain, days 6–14</label>
         </div>
-        <div class="satpick" id="eroDay" role="group" aria-label="Excessive rainfall outlook day" hidden><span>Risk day</span><button data-day="0" aria-pressed="true">1</button><button data-day="1" aria-pressed="false">2</button><button data-day="2" aria-pressed="false">3</button><button data-day="3" aria-pressed="false">4</button><button data-day="4" aria-pressed="false">5</button></div>
+        <div class="satpick" id="eroDay" data-pick="eroDay" role="group" aria-label="Excessive rainfall outlook day" hidden><span>Flood day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button></div>
+        <div class="satpick" id="spcDay" data-pick="spcDay" role="group" aria-label="Severe weather outlook day" hidden><span>Severe day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button><button data-v="5" aria-pressed="false">6</button><button data-v="6" aria-pressed="false">7</button><button data-v="7" aria-pressed="false">8</button></div>
+        <div class="satpick" id="cpcPick" data-pick="cpcPick" role="group" aria-label="Climate Prediction Center outlook" hidden><span>Days 6–10</span><button data-v="0" aria-pressed="true">Temp</button><button data-v="1" aria-pressed="false">Rain</button><span>8–14</span><button data-v="2" aria-pressed="false">Temp</button><button data-v="3" aria-pressed="false">Rain</button></div>
         <div class="satpick" id="models" role="group" aria-label="Model"><span>Model</span></div>
-        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC outlooks; point forecasts from the National Weather Service.</p>
+        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC, SPC and CPC outlooks; point forecasts from the National Weather Service.</p>
       </div>
     </aside>
 
@@ -110,6 +114,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

@@ -2,7 +2,7 @@
  *
  *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions)
  *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram (api.weather.gov)
- *   WPC           7-day rainfall forecast and excessive rainfall outlooks (NOAA map services, drawn live)
+ *   WPC, SPC, CPC 7-day rainfall, excessive rainfall, day 1–8 severe and 6–14 day outlooks (NOAA map services, drawn live)
  *   Census TIGERweb / Geocoder, USGS GNIS   place search
  */
 (() => {
@@ -20,7 +20,7 @@
     info: null, model: 0, product: null, hour: 0, timer: null,
     view: params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
     point: null, pointError: null, openPeriod: null, query: "",
-    compare: params.get("compare") === "1", wpc: { qpf: false, ero: false, eroDay: 0 },
+    compare: params.get("compare") === "1", wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
   };
 
   // —— Map ————————————————————————————————————————————————————————
@@ -102,9 +102,23 @@
     $("tag2").textContent = tag(other, h2) + (validAt(other, h2) !== t ? " (nearest)" : "");
   }
 
-  // —— WPC rainfall overlays (live from NOAA map services) ——————————————————————
-  const WPC_QPF = "https://mapservices.weather.noaa.gov/vector/rest/services/precip/wpc_qpf/MapServer";
-  const WPC_ERO = "https://mapservices.weather.noaa.gov/vector/rest/services/hazards/wpc_precip_hazards/MapServer";
+  // —— Outlook overlays: WPC rainfall, SPC severe and CPC days 6–14 (live from NOAA map services) ——————————
+  const MAPSERVICES = "https://mapservices.weather.noaa.gov/vector/rest/services";
+  const WPC_QPF = `${MAPSERVICES}/precip/wpc_qpf/MapServer`;
+  const WPC_ERO = `${MAPSERVICES}/hazards/wpc_precip_hazards/MapServer`;
+  const SPC_OUTLOOK = `${MAPSERVICES}/outlooks/SPC_wx_outlks/MapServer`;
+  const SPC_LAYERS = [1, 9, 17, 21, 22, 23, 24, 25];   // days 1–3 categorical, days 4–8 probabilistic
+  const CPC = [["6_10", 0, "6–10 day temperature"], ["6_10", 1, "6–10 day precipitation"], ["8_14", 0, "8–14 day temperature"], ["8_14", 1, "8–14 day precipitation"]];
+  /** Calendar day an SPC outlook day covers (each runs 12 UTC to 12 UTC). */
+  const spcDate = (n) => new Date(Date.now() - 12 * 3600e3 + n * 86_400_000).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+  const OUTLOOKS = {
+    qpf: { credit: "WPC", opacity: 0.65, src: () => [WPC_QPF, 11], title: () => "WPC rainfall, next 7 days (in)" },
+    ero: { credit: "WPC", opacity: 0.55, src: () => [WPC_ERO, state.wpc.eroDay], title: () => `Excessive rainfall risk, day ${state.wpc.eroDay + 1}` },
+    spc: { credit: "SPC", opacity: 0.55, src: () => [SPC_OUTLOOK, SPC_LAYERS[state.wpc.spcDay]],
+      title: () => `SPC severe weather outlook, day ${state.wpc.spcDay + 1} (${spcDate(state.wpc.spcDay)})${state.wpc.spcDay >= 3 ? " · chance of severe storms" : ""}` },
+    cpc: { credit: "CPC", opacity: 0.55, src: () => [`${MAPSERVICES}/outlooks/cpc_${CPC[state.wpc.cpcPick][0]}_day_outlk/MapServer`, CPC[state.wpc.cpcPick][1]],
+      title: () => `CPC ${CPC[state.wpc.cpcPick][2]} outlook · chance of above or below normal` },
+  };
   map.createPane("wpc").style.zIndex = 360;
   map.getPane("wpc").style.pointerEvents = "none";
   const ExportLayer = L.TileLayer.extend({
@@ -120,35 +134,42 @@
   const WpcLegend = L.Control.extend({ options: { position: "topleft" }, onAdd() { const d = L.DomUtil.create("div", "maplegend"); d.id = "wpcLegend"; return d; } });
   new WpcLegend().addTo(map);
   async function drawWpc() {
-    const want = { qpf: state.wpc.qpf && [WPC_QPF, 11], ero: state.wpc.ero && [WPC_ERO, state.wpc.eroDay] };
-    for (const k of ["qpf", "ero"]) {
+    const on = Object.keys(OUTLOOKS).filter((k) => state.wpc[k]);
+    for (const k of Object.keys(OUTLOOKS)) {
       wpcLayers[k]?.remove();
       delete wpcLayers[k];
-      if (want[k]) wpcLayers[k] = new ExportLayer("", { base: want[k][0], ids: want[k][1], pane: "wpc", opacity: k === "qpf" ? 0.65 : 0.55, attribution: "" }).addTo(map);
+      if (!state.wpc[k]) continue;
+      const [base, id] = OUTLOOKS[k].src();
+      wpcLayers[k] = new ExportLayer("", { base, ids: id, pane: "wpc", opacity: OUTLOOKS[k].opacity, attribution: "" }).addTo(map);
     }
-    if (!wpcLayers.qpf && !wpcLayers.ero) map.attributionControl.removeAttribution("WPC");
-    else map.attributionControl.addAttribution("WPC");
+    for (const credit of ["WPC", "SPC", "CPC"]) {
+      if (on.some((k) => OUTLOOKS[k].credit === credit)) map.attributionControl.addAttribution(credit);
+      else map.attributionControl.removeAttribution(credit);
+    }
     $("eroDay").hidden = !state.wpc.ero;
-    const parts = [];
-    for (const k of ["qpf", "ero"]) {
-      if (!want[k]) continue;
-      const [base, id] = want[k];
+    $("spcDay").hidden = !state.wpc.spc;
+    $("cpcPick").hidden = !state.wpc.cpc;
+    const parts = await Promise.all(on.map(async (k) => {
+      const [base, id] = OUTLOOKS[k].src();
       wpcLegends[base] ||= fetch(`${base}/legend?f=json`).then((r) => r.json()).then((d) => Object.fromEntries(d.layers.map((l) => [l.layerId, l]))).catch(() => ({}));
       const lg = (await wpcLegends[base])[id];
-      const items = (lg?.legend || []).filter((x) => x.label !== "0");
-      parts.push(`<h5 class="sub">${k === "qpf" ? "WPC rainfall, next 7 days (in)" : `Excessive rainfall risk, day ${state.wpc.eroDay + 1}`}</h5><div class="key">${(k === "qpf" ? items.slice().reverse() : items).map((x) =>
-        `<span><img alt="" src="data:${x.contentType};base64,${x.imageData}" width="12" height="12" style="vertical-align:-2px;margin-right:.3rem">${esc((x.label || "").replace(" (inches)", "").replace(/ \(At Least (\d+)%\)/, " ($1%+)"))}</span>`).join("")}</div>`);
-    }
+      let items = (lg?.legend || []).filter((x) => x.label !== "0");
+      if (k === "qpf") items = items.slice().reverse();
+      // CPC lists 15 shades; keep every other one so the key stays one or two lines.
+      if (k === "cpc") items = items.filter((x, i) => i % 2 === 0 || /Near/.test(x.label));
+      return `<h5 class="sub">${esc(OUTLOOKS[k].title())}</h5><div class="key">${items.map((x) =>
+        `<span><img alt="" src="data:${x.contentType};base64,${x.imageData}" width="12" height="12" style="vertical-align:-2px;margin-right:.3rem">${esc((x.label || "").replace(" (inches)", "").replace(/ \(At Least (\d+)%\)/, " ($1%+)"))}</span>`).join("")}</div>`;
+    }));
     $("wpcLegend").innerHTML = parts.join("");
   }
   $("overlays").addEventListener("change", (e) => { const k = e.target.dataset.wpc; if (k) { state.wpc[k] = e.target.checked; drawWpc(); } });
-  $("eroDay").addEventListener("click", (e) => {
-    const d = e.target.closest("[data-day]")?.dataset.day;
-    if (d == null) return;
-    state.wpc.eroDay = +d;
-    document.querySelectorAll("#eroDay [data-day]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.day === d));
+  document.querySelectorAll("[data-pick]").forEach((group) => group.addEventListener("click", (e) => {
+    const v = e.target.closest("[data-v]")?.dataset.v;
+    if (v == null) return;
+    state.wpc[group.dataset.pick] = +v;
+    group.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.v === v));
     drawWpc();
-  });
+  }));
 
   function preload() {
     const m = model(), p = product();
