@@ -1,7 +1,7 @@
 /* FutureWeather — model forecast console for standardweather.github.io.
  *
  *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions)
- *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram (api.weather.gov)
+ *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram and work windows (api.weather.gov)
  *   WPC, SPC, CPC 7-day rainfall, excessive rainfall, day 1–8 severe and 6–14 day outlooks (NOAA map services, drawn live)
  *   Census TIGERweb / Geocoder, USGS GNIS   place search
  */
@@ -18,7 +18,8 @@
   const params = new URLSearchParams(location.search);
   const state = {
     info: null, model: 0, product: null, hour: 0, timer: null,
-    view: params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
+    view: params.get("view") === "windows" ? "windows" : params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
+    work: null,
     point: null, pointError: null, openPeriod: null, query: "",
     compare: params.get("compare") === "1", wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
   };
@@ -246,7 +247,13 @@
     q.set("product", product().id);
     q.set("f", model().hours[state.hour]);
     if (state.point?.lat != null) q.set("loc", `${state.point.lat.toFixed(3)},${state.point.lon.toFixed(3)}`);
-    if (state.view === "forecast") q.set("view", "forecast");
+    if (state.view !== "maps") q.set("view", state.view);
+    if (state.view === "windows") {
+      q.set("job", state.work.preset);
+      const base = WORK[state.work.preset];
+      WORK_FIELDS.forEach(([k]) => { if ((state.work[k] ?? "") !== (base[k] ?? "")) q.set(k, state.work[k]); });
+      if (state.work.day !== base.day) q.set("day", state.work.day ? "1" : "0");
+    }
     if (state.compare) q.set("compare", "1");
     history.replaceState(null, "", `?${q}`);
   }
@@ -377,18 +384,136 @@
       <p class="chart-key"><span style="color:#ffbf47">━</span> temperature &nbsp;<span style="color:#4ad1ff">▮</span> chance of precipitation · next 48 hours, local time</p>`;
   }
 
+  // —— Work windows: hours in the next 7 days that meet a job's weather limits (NWS forecast grid) ——————————
+  // Presets are common rules of thumb, not standards; every limit can be changed.
+  const WORK = {
+    concrete: { name: "Concrete pour", tmin: 40, tmax: 90, wind: 25, gust: 35, pop: 20, rain: 0, hours: 8, day: true, note: "ACI 306 and 305 treat below 40°F as cold-weather and above 90°F as hot-weather concreting." },
+    crane: { name: "Crane lift", tmin: "", tmax: "", wind: 20, gust: 30, pop: 30, rain: 0.05, hours: 4, day: true, note: "Many crane charts limit lifts near 20 mph sustained; check the manufacturer's load chart. Forecast winds are at 33 ft, so winds at the boom tip are usually stronger." },
+    roofing: { name: "Roofing", tmin: 40, tmax: "", wind: 25, gust: 35, pop: 20, rain: 0, hours: 6, day: true, note: "Many shingle makers call for 40°F and up for proper sealing." },
+    paint: { name: "Exterior paint", tmin: 50, tmax: 90, wind: 15, gust: 25, pop: 10, rain: 0, rh: 85, hours: 6, day: true, note: "Most exterior coatings want 50°F and up, humidity under 85% and no rain for several hours after." },
+    drone: { name: "Drone flight", tmin: 32, tmax: 100, wind: 15, gust: 22, pop: 20, rain: 0, hours: 2, day: true, thunder: 10, note: "FAA Part 107 allows daylight and civil twilight flights; check airspace and the drone's wind limit." },
+    custom: { name: "Custom", tmin: "", tmax: "", wind: 20, gust: "", pop: 30, rain: "", hours: 4, day: false, note: "" },
+  };
+  const WORK_FIELDS = [["tmin", "Min temp °F"], ["tmax", "Max temp °F"], ["wind", "Max wind mph"], ["gust", "Max gust mph"], ["pop", "Max precip chance %"], ["rain", "Max rain in/hr"], ["rh", "Max humidity %"], ["thunder", "Max thunder chance %"], ["hours", "Shortest window, hours"]];
+  function workFromUrl() {
+    const k = params.get("job");
+    const w = { preset: WORK[k] ? k : "concrete", ...WORK[WORK[k] ? k : "concrete"] };
+    WORK_FIELDS.forEach(([f]) => { if (params.has(f)) w[f] = params.get(f) === "" ? "" : +params.get(f); });
+    if (params.has("day")) w.day = params.get("day") === "1";
+    return w;
+  }
+  state.work = workFromUrl();
+  const lim = (v) => (v === "" || v == null || !Number.isFinite(+v) ? null : +v);
+
+  /** Each hour in the next 7 days with what (if anything) rules it out. Daylight comes from the sun's elevation. */
+  function workHours(pt, w) {
+    const g = pt.grid, now = Math.floor(Date.now() / 3600e3) * 3600e3, out = [];
+    const L = Object.fromEntries(WORK_FIELDS.map(([f]) => [f, lim(w[f])]));
+    for (let t = now; t < now + 7 * 86400e3; t += 3600e3) {
+      const v = (k) => (g[k]?.has(t) ? g[k].get(t) : null);
+      const temp = v("temp");
+      if (temp == null) { out.push({ t, fail: ["no forecast"], nodata: true }); continue; }
+      const fail = [];
+      if (w.day && sunElevation(t + 1800e3, pt.lat, pt.lon) < -0.833) fail.push("dark");
+      if (L.tmin != null && temp < L.tmin) fail.push(`${Math.round(temp)}°F`);
+      if (L.tmax != null && temp > L.tmax) fail.push(`${Math.round(temp)}°F`);
+      if (L.wind != null && (v("wind") ?? 0) > L.wind) fail.push(`wind ${Math.round(v("wind"))} mph`);
+      if (L.gust != null && (v("gust") ?? 0) > L.gust) fail.push(`gusts ${Math.round(v("gust"))} mph`);
+      if (L.pop != null && (v("pop") ?? 0) > L.pop) fail.push(`${Math.round(v("pop"))}% precip`);
+      if (L.rain != null && (v("qpf") ?? 0) > L.rain + 1e-6) fail.push(`${(v("qpf") ?? 0).toFixed(2)}" rain`);
+      if (L.rh != null && (v("rh") ?? 0) > L.rh) fail.push(`${Math.round(v("rh"))}% humidity`);
+      if (L.thunder != null && (v("thunder") ?? 0) > L.thunder) fail.push(`${Math.round(v("thunder"))}% thunder`);
+      out.push({ t, fail, temp, wind: v("wind"), gust: v("gust"), pop: v("pop") });
+    }
+    return out;
+  }
+  /** Solar elevation in degrees (NOAA's simplified equations, good to a fraction of a degree). */
+  function sunElevation(ms, lat, lon) {
+    const d = ms / 86400e3 - 10957.5, r = Math.PI / 180;
+    const g = (357.529 + 0.98560028 * d) * r, q = 280.459 + 0.98564736 * d;
+    const L = (q + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * r, e = (23.439 - 0.00000036 * d) * r;
+    const dec = Math.asin(Math.sin(e) * Math.sin(L));
+    const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)) / r;
+    const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
+    const ha = ((gmst * 15 + lon - ra) % 360) * r;
+    return Math.asin(Math.sin(lat * r) * Math.sin(dec) + Math.cos(lat * r) * Math.cos(dec) * Math.cos(ha)) / r;
+  }
+  function workWindows(hours, minH) {
+    const out = [];
+    let run = null;
+    hours.forEach((h) => {
+      if (!h.fail.length) { if (!run) run = { start: h.t, end: h.t + 3600e3, hrs: [] }; run.end = h.t + 3600e3; run.hrs.push(h); }
+      else { if (run) out.push(run); run = null; }
+    });
+    if (run) out.push(run);
+    return out.filter((r) => r.hrs.length >= Math.max(1, minH || 1));
+  }
+
+  function workSummary(w) {
+    const L = (k) => lim(w[k]);
+    return [L("tmin") != null && L("tmax") != null ? `${L("tmin")}–${L("tmax")}°F` : L("tmin") != null ? `${L("tmin")}°F+` : L("tmax") != null ? `≤ ${L("tmax")}°F` : "",
+      L("wind") != null ? `wind ≤ ${L("wind")}` : "", L("gust") != null ? `gusts ≤ ${L("gust")}` : "", L("pop") != null ? `precip ≤ ${L("pop")}%` : "",
+      L("rh") != null ? `humidity ≤ ${L("rh")}%` : "", L("thunder") != null ? `thunder ≤ ${L("thunder")}%` : "", w.day ? "daylight" : "", L("hours") ? `${L("hours")}+ h` : ""].filter(Boolean).join(" · ") || "none";
+  }
+  function windowsView() {
+    const f = state.point, w = state.work;
+    let html = `<form class="search" id="search"><input id="q" placeholder="City, ST · street address · lat, lon" aria-label="Location" autocomplete="off" value="${esc(state.query)}" /><button class="btn btn--secondary">Go</button></form>
+      <div class="pad"><p class="note" style="margin-top:0">Find the hours in the next 7 days when the forecast meets a job's weather limits.</p>
+      <div class="chips" role="group" aria-label="Job" style="padding:0;margin-top:.6rem">${Object.entries(WORK).map(([k, v]) => `<button data-job="${k}" aria-pressed="${k === w.preset}">${esc(v.name)}</button>`).join("")}</div>
+      <details class="limits-box"${state.workOpen ? " open" : ""}><summary>Limits: ${esc(workSummary(w))}</summary>
+      <form id="limits" class="limits">${WORK_FIELDS.map(([k, label]) => `<label>${label}<input name="${k}" inputmode="decimal" value="${esc(w[k] ?? "")}" placeholder="any" /></label>`).join("")}
+        <label class="day"><input type="checkbox" name="day"${w.day ? " checked" : ""} /> Daylight only</label></form></details>
+      ${WORK[w.preset].note ? `<p class="note">${esc(WORK[w.preset].note)}</p>` : ""}</div>`;
+    if (state.pointError) return html + `<p class="empty">${esc(state.pointError)}</p>`;
+    if (f === "loading") return html + `<p class="empty">Loading forecast…</p>`;
+    if (!f) return html + `<p class="empty">Search a place or click the map to check it.</p>`;
+    if (!f.grid) return html + `<p class="empty">Loading the forecast grid for ${esc(f.place)}…</p>`;
+    const hours = workHours(f, w);
+    if (hours.every((h) => h.nodata)) return html + `<p class="empty">No forecast grid for this spot.</p>`;
+    const wins = workWindows(hours, lim(w.hours));
+    const tz = f.tz || undefined;
+    const fmt = (t, o) => new Date(t).toLocaleString("en-US", { timeZone: tz, ...o });
+    const span = (r) => `${fmt(r.start, { weekday: "short", hour: "numeric" })}–${fmt(r.end, { hour: "numeric", timeZoneName: "short" })}`;
+    // Why hours fail, most common first.
+    const why = {};
+    hours.forEach((h) => h.fail.filter((x) => x !== "dark").forEach((x) => { const k = x.replace(/[\d.]+(°F|%|")?\s*/g, "").trim() || "temperature"; why[k] = (why[k] || 0) + 1; }));
+    const ok = hours.filter((h) => !h.fail.length).length;
+    html += `<div class="pad" style="padding-top:0"><h5 class="sub">${esc(f.place)} · next 7 days</h5>`;
+    html += wins.length
+      ? `<table class="t"><tbody>${wins.map((r) => `<tr><td><b style="color:#fff">${esc(span(r))}</b><small>${r.hrs.length} h · ${Math.round(Math.min(...r.hrs.map((h) => h.temp)))}–${Math.round(Math.max(...r.hrs.map((h) => h.temp)))}°F · wind to ${Math.round(Math.max(...r.hrs.map((h) => h.wind ?? 0)))} mph${r.hrs.some((h) => h.gust != null) ? `, gusts ${Math.round(Math.max(...r.hrs.map((h) => h.gust ?? 0)))}` : ""} · precip ≤ ${Math.round(Math.max(...r.hrs.map((h) => h.pop ?? 0)))}%</small></td></tr>`).join("")}</tbody></table>`
+      : `<p class="note"><b>No window of ${lim(w.hours) || 1}+ hours</b> meets these limits in the next 7 days.</p>`;
+    // Day-by-hour strip: green hours qualify.
+    const days = [];
+    hours.forEach((h) => { const k = fmt(h.t, { weekday: "short", month: "numeric", day: "numeric" }); (days.at(-1)?.k === k ? days.at(-1) : (days.push({ k, hrs: [] }), days.at(-1))).hrs.push(h); });
+    html += `<div class="strip" aria-label="Hours that meet the limits">${days.map((d) => `<div class="strip__row"><span>${esc(d.k)}</span><div>${Array.from({ length: 24 }, (_, i) => {
+      const h = d.hrs.find((x) => +fmt(x.t, { hour: "numeric", hourCycle: "h23" }) === i);
+      if (!h) return `<i class="na"></i>`;
+      const cls = h.nodata ? "na" : h.fail.length ? (h.fail.length === 1 && h.fail[0] === "dark" ? "dark" : "no") : "ok";
+      return `<i class="${cls}" title="${esc(fmt(h.t, { weekday: "short", hour: "numeric" }))}: ${esc(h.fail.length ? h.fail.join(", ") : "OK")}"></i>`;
+    }).join("")}</div></div>`).join("")}
+      <div class="strip__row"><span></span><div class="strip__ticks"><b>12a</b><b>6a</b><b>12p</b><b>6p</b></div></div></div>
+      <p class="chart-key"><span style="color:#3fcf9a">▮</span> meets limits <span style="color:#ff6b5a">▮</span> doesn't <span style="color:rgba(255,255,255,.25)">▮</span> dark · ${esc(fmt(Date.now(), { timeZoneName: "short" }).split(" ").pop())}. Hover an hour for the reason.</p>
+      <p class="note">${ok} of ${hours.length} hours qualify.${Object.keys(why).length ? ` Most often ruled out by ${Object.entries(why).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${esc(k)} (${n} h)`).join(", ")}.` : ""}
+        From the NWS forecast grid, updated ${esc(dayZ(f.updated))}. Forecast winds are sustained at 33 ft; gusts and rain timing get less certain after 3 days.
+        <button class="linkish" data-sharework="1">Copy link</button></p></div>`;
+    return html;
+  }
+
   function setTabs() { document.querySelectorAll("#views button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === state.view)); }
   function render() {
-    if (!state.info) { if (state.view === "forecast") $("panel").innerHTML = forecastView(); return; }
-    $("panel").innerHTML = state.view === "forecast" ? forecastView() : mapsView();
+    if (!state.info) { if (state.view !== "maps") $("panel").innerHTML = state.view === "windows" ? windowsView() : forecastView(); return; }
+    $("panel").innerHTML = state.view === "forecast" ? forecastView() : state.view === "windows" ? windowsView() : mapsView();
   }
   $("views").addEventListener("click", (e) => {
     const v = e.target.closest("[data-view]")?.dataset.view;
     if (!v) return;
     state.view = v; setTabs(); render(); syncUrl();
-    if (v === "forecast" && !state.point) $("q")?.focus();
+    if (v !== "maps" && !state.point) $("q")?.focus();
   });
   $("panel").addEventListener("click", (e) => {
+    const job = e.target.closest("[data-job]")?.dataset.job;
+    if (job) { state.work = { preset: job, ...WORK[job] }; render(); syncUrl(); return; }
+    if (e.target.closest("[data-sharework]")) { navigator.clipboard?.writeText(location.href).then(() => { setStatus("Link copied"); setTimeout(() => setStatus(""), 2000); }); return; }
     if (e.target.closest("[data-compare]")) { state.compare = !state.compare; drawCompare(); render(); syncUrl(); return; }
     const b = e.target.closest("[data-product], [data-period]");
     if (!b) return;
@@ -396,6 +521,15 @@
     const i = +b.dataset.period;
     state.openPeriod = state.openPeriod === i ? null : i;
     render();
+  });
+  $("panel").addEventListener("change", (e) => {
+    const form = e.target.closest("#limits");
+    if (!form) return;
+    state.workOpen = true;
+    const w = state.work;
+    WORK_FIELDS.forEach(([k]) => { const v = form.elements[k].value.trim(); w[k] = v === "" ? "" : +v; });
+    w.day = form.elements.day.checked;
+    render(); syncUrl();
   });
   $("panel").addEventListener("submit", async (e) => {
     if (e.target.id !== "search") return;
@@ -417,7 +551,8 @@
 
   // —— Point forecast (NWS API) ———————————————————————————————————————
   map.on("click", (e) => {
-    state.view = "forecast"; setTabs();
+    if (state.view !== "windows") state.view = "forecast";
+    setTabs();
     showForecast(e.latlng.lat, e.latlng.lng);
   });
 
@@ -436,7 +571,7 @@
       if (!daily) throw new Error("The NWS forecast didn't load. It sometimes takes a second try.");
       const rel = pr.relativeLocation?.properties;
       state.point = {
-        lat, lon, office: pr.gridId,
+        lat, lon, office: pr.gridId, tz: pr.timeZone,
         place: rel ? `${rel.city}, ${rel.state}` : `${lat.toFixed(2)}, ${lon.toFixed(2)}`,
         link: `https://forecast.weather.gov/MapClick.php?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`,
         updated: daily.properties?.updateTime, periods: daily.properties?.periods || [], hourly: (hourly?.properties?.periods || []).slice(0, 48),
@@ -452,14 +587,16 @@
           wind: gridSeries(p.windSpeed, kmh), gust: gridSeries(p.windGust, kmh),
           sky: gridSeries(p.skyCover), pop: gridSeries(p.probabilityOfPrecipitation),
           qpf: gridSeries(p.quantitativePrecipitation, (mm) => mm / 25.4, true),
+          rh: gridSeries(p.relativeHumidity), thunder: gridSeries(p.probabilityOfThunder),
         };
-        if (state.view === "forecast") render();
-      }).catch(() => { if (state.point === pt) { pt.grid = { temp: new Map(), dew: new Map() }; if (state.view === "forecast") render(); } });
+
+        if (state.view !== "maps") render();
+      }).catch(() => { if (state.point === pt) { pt.grid = { temp: new Map(), dew: new Map() }; if (state.view !== "maps") render(); } });
     } catch (err) {
       state.point = null;
       state.pointError = err.message;
     }
-    if (state.view === "forecast") render();
+    if (state.view !== "maps") render();
     syncUrl();
   }
 
