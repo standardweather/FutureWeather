@@ -57,6 +57,15 @@
     .limits input { min-height: 0; padding: 0.35rem 0.5rem; font: 0.82rem var(--mono); border-radius: 6px; box-shadow: none; }
     .limits label.day { flex-direction: row; align-items: center; gap: 0.45rem; font-size: 0.8rem; color: var(--text2); grid-column: 1 / -1; }
     .limits label.day input { appearance: auto; width: 0.9rem; height: 0.9rem; padding: 0; accent-color: var(--accent); }
+    #views { flex-wrap: wrap; column-gap: 1.1rem; row-gap: 0; }
+    .conf-sum { margin: 0.2rem 0 0.7rem; padding: 0.15rem 0.7rem 0.45rem; border-left: 3px solid var(--accent); background: rgba(74, 209, 255, 0.05); }
+    .conf-sum p { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--text2); line-height: 1.5; max-width: none; }
+    .conf-sum b { color: #fff; font-weight: 600; }
+    table.conf th small { display: block; font-weight: 400; color: var(--text3); font-size: 0.66rem; }
+    table.conf .bar { height: 3px; margin-top: 3px; background: rgba(255, 255, 255, 0.08); border-radius: 2px; }
+    table.conf .bar i { display: block; height: 100%; background: #4ad1ff; border-radius: 2px; }
+    .conf-tag { font: 500 0.74rem var(--mono); white-space: nowrap; }
+    .odds { margin-left: 0.5rem; font: 0.7rem var(--mono); color: #3fcf9a; white-space: nowrap; }
     .strip { margin-top: 0.8rem; }
     .strip__row { display: grid; grid-template-columns: 4.6rem 1fr; align-items: center; gap: 0.4rem; margin-top: 2px; }
     .strip__row span { font: 0.7rem var(--mono); color: var(--text3); }
@@ -93,6 +102,7 @@
       <div class="tabs" role="tablist" aria-label="View" id="views">
         <button role="tab" data-view="maps" aria-selected="true">Model maps</button>
         <button role="tab" data-view="forecast" aria-selected="false">Point forecast</button>
+        <button role="tab" data-view="confidence" aria-selected="false">Confidence</button>
         <button role="tab" data-view="windows" aria-selected="false">Work windows</button>
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
@@ -108,7 +118,7 @@
         <div class="satpick" id="spcDay" data-pick="spcDay" role="group" aria-label="Severe weather outlook day" hidden><span>Severe day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button><button data-v="5" aria-pressed="false">6</button><button data-v="6" aria-pressed="false">7</button><button data-v="7" aria-pressed="false">8</button></div>
         <div class="satpick" id="cpcPick" data-pick="cpcPick" role="group" aria-label="Climate Prediction Center outlook" hidden><span>Days 6–10</span><button data-v="0" aria-pressed="true">Temp</button><button data-v="1" aria-pressed="false">Rain</button><span>8–14</span><button data-v="2" aria-pressed="false">Temp</button><button data-v="3" aria-pressed="false">Rain</button></div>
         <div class="satpick" id="models" role="group" aria-label="Model"><span>Model</span></div>
-        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC, SPC and CPC outlooks; point forecasts from the National Weather Service.</p>
+        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, GEFS ensemble, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC, SPC and CPC outlooks; point forecasts from the National Weather Service.</p>
       </div>
     </aside>
 
@@ -132,6 +142,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
