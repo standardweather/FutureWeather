@@ -2,6 +2,7 @@
  *
  *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions)
  *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram and work windows (api.weather.gov)
+ *   GEFS          NOAA's 31-member ensemble at the point, for forecast confidence (tiles packed by make_ensemble.py)
  *   WPC, SPC, CPC 7-day rainfall, excessive rainfall, day 1–8 severe and 6–14 day outlooks (NOAA map services, drawn live)
  *   Census TIGERweb / Geocoder, USGS GNIS   place search
  */
@@ -18,7 +19,7 @@
   const params = new URLSearchParams(location.search);
   const state = {
     info: null, model: 0, product: null, hour: 0, timer: null,
-    view: params.get("view") === "windows" ? "windows" : params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
+    view: ["windows", "confidence"].includes(params.get("view")) ? params.get("view") : params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
     work: null,
     point: null, pointError: null, openPeriod: null, query: "",
     compare: params.get("compare") === "1", wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
@@ -286,6 +287,7 @@
         ${state.openPeriod === i ? `<small style="color:var(--text2);margin-top:.3rem">${esc(p.detailedForecast)}</small>` : ""}</td></tr>`).join("")}</tbody></table>
       <h5 class="sub" style="margin-top:1rem">7-day meteogram</h5>
       ${f.grid ? meteogram(f.grid) : `<p class="note">Loading the forecast grid…</p>`}
+      <p class="note">How sure is it? <button class="linkish" data-goview="confidence">See forecast confidence</button> from NOAA's 31-member ensemble.</p>
       <p class="note">The NWS forecast starts from the National Blend of Models, adjusted by local forecasters. Tap a day for details.
         <a href="${esc(f.link)}" target="_blank" rel="noopener">Full forecast at weather.gov ↗</a></p></div>`;
   }
@@ -468,6 +470,7 @@
     if (f === "loading") return html + `<p class="empty">Loading forecast…</p>`;
     if (!f) return html + `<p class="empty">Search a place or click the map to check it.</p>`;
     if (!f.grid) return html + `<p class="empty">Loading the forecast grid for ${esc(f.place)}…</p>`;
+    if (!f.ens) loadConfidence(f);
     const hours = workHours(f, w);
     if (hours.every((h) => h.nodata)) return html + `<p class="empty">No forecast grid for this spot.</p>`;
     const wins = workWindows(hours, lim(w.hours));
@@ -480,7 +483,7 @@
     const ok = hours.filter((h) => !h.fail.length).length;
     html += `<div class="pad" style="padding-top:0"><h5 class="sub">${esc(f.place)} · next 7 days</h5>`;
     html += wins.length
-      ? `<table class="t"><tbody>${wins.map((r) => `<tr><td><b style="color:#fff">${esc(span(r))}</b><small>${r.hrs.length} h · ${Math.round(Math.min(...r.hrs.map((h) => h.temp)))}–${Math.round(Math.max(...r.hrs.map((h) => h.temp)))}°F · wind to ${Math.round(Math.max(...r.hrs.map((h) => h.wind ?? 0)))} mph${r.hrs.some((h) => h.gust != null) ? `, gusts ${Math.round(Math.max(...r.hrs.map((h) => h.gust ?? 0)))}` : ""} · precip ≤ ${Math.round(Math.max(...r.hrs.map((h) => h.pop ?? 0)))}%</small></td></tr>`).join("")}</tbody></table>`
+      ? `<table class="t"><tbody>${wins.map((r) => { const odds = f.ens?.tmax ? ensWindowOdds(f.ens, w, r) : null; return `<tr><td><b style="color:#fff">${esc(span(r))}</b>${odds ? `<span class="odds" title="GEFS ensemble members that keep this window within the temperature, wind and rain limits">${odds.ok} of ${odds.n} members agree</span>` : ""}<small>${r.hrs.length} h · ${Math.round(Math.min(...r.hrs.map((h) => h.temp)))}–${Math.round(Math.max(...r.hrs.map((h) => h.temp)))}°F · wind to ${Math.round(Math.max(...r.hrs.map((h) => h.wind ?? 0)))} mph${r.hrs.some((h) => h.gust != null) ? `, gusts ${Math.round(Math.max(...r.hrs.map((h) => h.gust ?? 0)))}` : ""} · precip ≤ ${Math.round(Math.max(...r.hrs.map((h) => h.pop ?? 0)))}%</small></td></tr>`; }).join("")}</tbody></table>`
       : `<p class="note"><b>No window of ${lim(w.hours) || 1}+ hours</b> meets these limits in the next 7 days.</p>`;
     // Day-by-hour strip: green hours qualify.
     const days = [];
@@ -494,15 +497,16 @@
       <div class="strip__row"><span></span><div class="strip__ticks"><b>12a</b><b>6a</b><b>12p</b><b>6p</b></div></div></div>
       <p class="chart-key"><span style="color:#3fcf9a">▮</span> meets limits <span style="color:#ff6b5a">▮</span> doesn't <span style="color:rgba(255,255,255,.25)">▮</span> dark · ${esc(fmt(Date.now(), { timeZoneName: "short" }).split(" ").pop())}. Hover an hour for the reason.</p>
       <p class="note">${ok} of ${hours.length} hours qualify.${Object.keys(why).length ? ` Most often ruled out by ${Object.entries(why).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${esc(k)} (${n} h)`).join(", ")}.` : ""}
-        From the NWS forecast grid, updated ${esc(dayZ(f.updated))}. Forecast winds are sustained at 33 ft; gusts and rain timing get less certain after 3 days.
+        From the NWS forecast grid, updated ${esc(dayZ(f.updated))}.${f.ens?.tmax ? ` “Members agree” counts the GEFS ensemble's 31 runs that stay within the temperature, wind and rain limits over the window's 6-hour steps.` : ""} Forecast winds are sustained at 33 ft; gusts and rain timing get less certain after 3 days.
         <button class="linkish" data-sharework="1">Copy link</button></p></div>`;
     return html;
   }
 
   function setTabs() { document.querySelectorAll("#views button").forEach((b) => b.setAttribute("aria-selected", b.dataset.view === state.view)); }
   function render() {
-    if (!state.info) { if (state.view !== "maps") $("panel").innerHTML = state.view === "windows" ? windowsView() : forecastView(); return; }
-    $("panel").innerHTML = state.view === "forecast" ? forecastView() : state.view === "windows" ? windowsView() : mapsView();
+    const views = { forecast: forecastView, windows: windowsView, confidence: confidenceView };
+    if (!state.info) { if (state.view !== "maps") $("panel").innerHTML = (views[state.view] || forecastView)(); return; }
+    $("panel").innerHTML = (views[state.view] || mapsView)();
   }
   $("views").addEventListener("click", (e) => {
     const v = e.target.closest("[data-view]")?.dataset.view;
@@ -514,6 +518,8 @@
     const job = e.target.closest("[data-job]")?.dataset.job;
     if (job) { state.work = { preset: job, ...WORK[job] }; render(); syncUrl(); return; }
     if (e.target.closest("[data-sharework]")) { navigator.clipboard?.writeText(location.href).then(() => { setStatus("Link copied"); setTimeout(() => setStatus(""), 2000); }); return; }
+    const go = e.target.closest("[data-goview]")?.dataset.goview;
+    if (go) { state.view = go; setTabs(); render(); syncUrl(); return; }
     if (e.target.closest("[data-compare]")) { state.compare = !state.compare; drawCompare(); render(); syncUrl(); return; }
     const b = e.target.closest("[data-product], [data-period]");
     if (!b) return;
@@ -709,6 +715,185 @@
     }
     if (!hit || !Number.isFinite(hit.lat) || !Number.isFinite(hit.lon)) throw new Error("Place not found. Try “City, ST”, a street address, or lat, lon.");
     return hit;
+  }
+
+  // —— Forecast confidence: the NOAA GEFS ensemble at the point (tiles packed by make_ensemble.py) ——————————
+  // 31 runs of the GFS from slightly different starts. Each step covers the 6 hours before it.
+  const ENS_RAIN = 0.05;   // inches in a day that count as "rain" for a member
+  async function loadEnsIndex() {
+    if (!state.ensIndex) state.ensIndex = fetch(`ens/index.json?t=${Date.now()}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    return state.ensIndex;
+  }
+  const ensTiles = new Map();
+  /** Every member's series at the grid point nearest (lat, lon): { tmax, tmin, wind, apcp }[member][step], or null outside the grid. */
+  async function ensAt(lat, lon) {
+    const ix = await loadEnsIndex();
+    if (!ix) throw new Error("The ensemble hasn't been published yet.");
+    const g = ix.grid, M = ix.members.length, S = ix.hours.length;
+    const r = Math.round((g.north - lat) / g.res), c = Math.round((lon - g.west) / g.res);
+    if (r < 0 || c < 0 || r >= g.nlat || c >= g.nlon) return null;
+    const key = `${Math.floor(r / g.tile)}_${Math.floor(c / g.tile)}`;
+    if (!ensTiles.has(key)) ensTiles.set(key, fetch(`ens/${key}.bin?run=${encodeURIComponent(ix.cycle)}`).then((x) => { if (!x.ok) throw new Error(`ensemble tile ${x.status}`); return x.arrayBuffer(); }));
+    const buf = await ensTiles.get(key).catch((e) => { ensTiles.delete(key); throw e; });
+    const block = M * S * 5, at = ((r % g.tile) * g.tile + (c % g.tile)) * block;
+    const u8 = new Uint8Array(buf, at, M * S * 3), dv = new DataView(buf, at + M * S * 3, M * S * 2);
+    const series = (k, off) => Array.from({ length: M }, (_, m) => Array.from({ length: S }, (_, s) => { const v = u8[k * M * S + m * S + s]; return v === 255 ? null : v - off; }));
+    return {
+      ix, lat: g.north - r * g.res, lon: g.west + c * g.res,
+      tmax: series(0, 80), tmin: series(1, 80), wind: series(2, 0),
+      apcp: Array.from({ length: M }, (_, m) => Array.from({ length: S }, (_, s) => { const v = dv.getUint16((m * S + s) * 2, true); return v === 65535 ? null : v / 100; })),
+    };
+  }
+  async function loadConfidence(pt) {
+    if (pt.ens) return;
+    pt.ens = "loading";
+    try { pt.ens = (await ensAt(pt.lat, pt.lon)) || { error: "The ensemble covers the lower 48 states only." }; }
+    catch (e) { pt.ens = { error: e.message }; }
+    if (state.point === pt && ["confidence", "windows"].includes(state.view)) render();
+  }
+
+  const pct = (arr, p) => { const a = arr.filter((v) => v != null).sort((x, y) => x - y); if (!a.length) return null; const i = (a.length - 1) * p, lo = Math.floor(i); return a[lo] + (a[Math.min(a.length - 1, lo + 1)] - a[lo]) * (i - lo); };
+  /** Local days (in the point's time zone) with every member's high, low, rain and peak wind. */
+  function ensDays(e, tz) {
+    const init = Date.parse(e.ix.init), M = e.tmax.length;
+    const dayKey = (t) => new Date(t).toLocaleDateString("en-CA", { timeZone: tz });
+    const days = new Map();
+    e.ix.hours.forEach((h, s) => {
+      const mid = init + (h - 3) * 3600e3, k = dayKey(mid);
+      const d = days.get(k) || days.set(k, { k, t: mid, steps: [] }).get(k);
+      d.steps.push(s);
+    });
+    return [...days.values()].filter((d) => d.steps.length === 4).map((d) => {
+      const per = (fn) => Array.from({ length: M }, (_, m) => fn(m));
+      const high = per((m) => { const v = d.steps.map((s) => e.tmax[m][s]).filter((x) => x != null); return v.length ? Math.max(...v) : null; });
+      const low = per((m) => { const v = d.steps.map((s) => e.tmin[m][s]).filter((x) => x != null); return v.length ? Math.min(...v) : null; });
+      const rain = per((m) => { const v = d.steps.map((s) => e.apcp[m][s]).filter((x) => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; });
+      const wind = per((m) => { const v = d.steps.map((s) => e.wind[m][s]).filter((x) => x != null); return v.length ? Math.max(...v) : null; });
+      const n = rain.filter((x) => x != null).length, wet = rain.filter((x) => x != null && x >= ENS_RAIN).length;
+      const spread = pct(high, 0.9) - pct(high, 0.1), frac = n ? wet / n : 0;
+      const tConf = spread <= 6 ? 2 : spread <= 12 ? 1 : 0;
+      const rConf = frac <= 0.15 || frac >= 0.85 ? 2 : frac >= 0.3 && frac <= 0.7 ? 0 : 1;
+      return { ...d, high, low, rain, wind, n, wet, frac, spread, conf: Math.min(tConf, rConf) };
+    });
+  }
+  const CONF = [["Low", "#ff6b5a"], ["Medium", "#ffbf47"], ["High", "#3fcf9a"]];
+
+  function confidenceView() {
+    const f = state.point;
+    let html = `<form class="search" id="search"><input id="q" placeholder="City, ST · street address · lat, lon" aria-label="Location" autocomplete="off" value="${esc(state.query)}" /><button class="btn btn--secondary">Go</button></form>`;
+    if (state.pointError) return html + `<p class="empty">${esc(state.pointError)}</p>`;
+    if (f === "loading") return html + `<p class="empty">Loading forecast…</p>`;
+    if (!f) return html + `<p class="empty">Search a place or click the map to see how much the 31 runs of NOAA's ensemble agree on its next 7 days.</p>`;
+    if (!f.ens || f.ens === "loading") { loadConfidence(f); return html + `<p class="empty">Loading the GEFS ensemble for ${esc(f.place)}…</p>`; }
+    if (f.ens.error) return html + `<p class="empty">${esc(f.ens.error)}</p>`;
+    const e = f.ens, M = e.tmax.length, tz = f.tz || undefined;
+    const days = ensDays(e, tz);
+    if (!days.length) return html + `<p class="empty">No ensemble data for this spot.</p>`;
+    const dname = (d) => new Date(d.t).toLocaleDateString("en-US", { timeZone: tz, weekday: "short" });
+    // The NWS high for each day, to set beside the ensemble's range.
+    const nwsHigh = {};
+    (f.periods || []).filter((p) => p.isDaytime).forEach((p) => { nwsHigh[new Date(p.startTime).toLocaleDateString("en-CA", { timeZone: tz })] = p.temperature; });
+    const r0 = (v) => (v == null ? "—" : Math.round(v));
+    html += `<div class="pad"><h5 class="sub">${esc(f.place)} · GEFS ${esc(dayZ(e.ix.init))} run · ${M} members</h5>`;
+    html += `<div class="conf-sum">${confSummary(days, M, dname).map((t) => `<p>${t}</p>`).join("")}</div>`;
+    html += `<table class="t conf"><thead><tr><th>Day</th><th>High °F<small>10–90%</small></th><th>Rain<small>members ≥ ${ENS_RAIN}"</small></th><th>Peak wind<small>median · 90%</small></th><th>Confidence</th></tr></thead><tbody>${days.map((d) => {
+      const nws = nwsHigh[d.k];
+      const lo = pct(d.high, 0.1), hi = pct(d.high, 0.9);
+      const outside = nws != null && (nws < lo - 1 || nws > hi + 1);
+      return `<tr><td><b style="color:#fff">${esc(dname(d))}</b><small>${esc(new Date(d.t).toLocaleDateString("en-US", { timeZone: tz, month: "numeric", day: "numeric" }))}</small></td>
+        <td><b style="color:#fff">${r0(pct(d.high, 0.5))}°</b><small>${r0(lo)}–${r0(hi)}°${nws != null ? ` · NWS ${nws}°${outside ? " ⚑" : ""}` : ""}</small></td>
+        <td><b style="color:#fff">${d.wet} of ${d.n}</b><div class="bar"><i style="width:${Math.round(d.frac * 100)}%"></i></div><small>${d.wet ? `median ${pct(d.rain.filter((x) => x >= ENS_RAIN), 0.5).toFixed(2)}" when wet` : "dry"}</small></td>
+        <td>${r0(pct(d.wind, 0.5))} · ${r0(pct(d.wind, 0.9))}<small>mph</small></td>
+        <td><span class="conf-tag" style="color:${CONF[d.conf][1]}">● ${CONF[d.conf][0]}</span></td></tr>`;
+    }).join("")}</tbody></table>`;
+    html += `<p class="chart-key">⚑ the NWS forecast high is outside the ensemble's middle 80%.</p>`;
+    html += `<h5 class="sub" style="margin-top:1rem">Temperature plume</h5>${tempPlume(e, tz)}<h5 class="sub" style="margin-top:1rem">Rain piling up, member by member</h5>${rainPlume(e, tz)}`;
+    html += `<p class="note">Each thin line is one run of NOAA's Global Ensemble Forecast System, started from slightly different conditions; the bold line is their median.
+      Where the lines bunch together the forecast is more certain. Confidence is high when the 10–90% spread of highs is 6°F or less and nearly all members agree on rain or no rain, and low when highs spread more than 12°F or members split near half and half.
+      GEFS is a 0.5° (about 30 mile) grid, so it smooths out mountains, coasts and thunderstorms; use the NWS point forecast for the details.</p></div>`;
+    return html;
+  }
+
+  /** A few plain sentences: rain chances, the least certain day, and the run's overall confidence. */
+  function confSummary(days, M, dname) {
+    const out = [];
+    const wet = days.filter((d) => d.frac >= 0.3);
+    if (!wet.length) out.push(`<b>Dry week likely:</b> no day has rain in more than ${Math.max(...days.map((d) => d.wet))} of ${M} members.`);
+    else out.push(`<b>Rain:</b> ${wet.map((d) => `${dname(d)} ${d.wet} of ${d.n} members`).join(" · ")}.`);
+    const loose = days.reduce((m, d) => (d.spread > m.spread ? d : m));
+    if (loose.spread > 8) out.push(`<b>Least certain:</b> ${dname(loose)}, with highs from ${Math.round(pct(loose.high, 0.1))}° to ${Math.round(pct(loose.high, 0.9))}°.`);
+    const firstLow = days.findIndex((d) => d.conf === 0);
+    out.push(firstLow === -1 ? "<b>Confidence holds up all week.</b>" : firstLow === 0 ? `<b>Confidence is low from the start</b>; plan for a range of outcomes.` : `<b>Confidence is good through ${dname(days[firstLow - 1])}</b> and drops after that.`);
+    return out;
+  }
+
+  function plumeFrame(e, tz, lo, hi, unit, H) {
+    const init = Date.parse(e.ix.init), hrs = e.ix.hours;
+    const t0 = init + (hrs[0] - 6) * 3600e3, t1 = init + hrs[hrs.length - 1] * 3600e3;
+    const W = 336, L0 = 28, R0 = 8, T0 = 6, B0 = 16;
+    const x = (t) => L0 + ((t - t0) / (t1 - t0)) * (W - L0 - R0);
+    const y = (v) => T0 + (1 - (v - lo) / (hi - lo)) * (H - T0 - B0);
+    const mono = 'font-family="IBM Plex Mono, monospace" font-size="9" fill="rgba(255,255,255,.42)"';
+    let svg = "";
+    const step = (hi - lo) > 40 ? 20 : (hi - lo) > 4 ? 10 : (hi - lo) > 2 ? 1 : 0.5;
+    for (let v = lo; v <= hi + 1e-9; v += step) svg += `<line x1="${L0}" x2="${W - R0}" y1="${y(v)}" y2="${y(v)}" stroke="rgba(255,255,255,.07)"/><text x="${L0 - 4}" y="${y(v) + 3}" text-anchor="end" ${mono}>${+v.toFixed(1)}${unit}</text>`;
+    const day0 = new Date(new Date(t0).toLocaleString("en-US", { timeZone: tz }));
+    const offset = day0.getTime() - t0;   // local wall clock minus UTC, near enough for day lines
+    for (let t = Math.ceil((t0 + offset) / 86400e3) * 86400e3 - offset; t < t1; t += 86400e3) {
+      svg += `<line x1="${x(t)}" x2="${x(t)}" y1="${T0}" y2="${H - B0}" stroke="rgba(255,255,255,.12)"/>`;
+      if (t + 12 * 3600e3 < t1) svg += `<text x="${x(t + 12 * 3600e3).toFixed(1)}" y="${H - 4}" text-anchor="middle" ${mono}>${new Date(t + 12 * 3600e3).toLocaleDateString("en-US", { timeZone: tz, weekday: "short" })}</text>`;
+    }
+    return { W, H, x, y, svg, init, hrs };
+  }
+  const pathOf = (pts) => { let d = "", pen = false; pts.forEach(([px, py]) => { if (py == null) { pen = false; return; } d += `${pen ? "L" : "M"}${px.toFixed(1)},${py.toFixed(1)}`; pen = true; }); return d; };
+
+  function tempPlume(e, tz) {
+    // Alternate each member's 6-hour maximum and minimum at the middle of each step: a daily wave per member.
+    const vals = [...e.tmax.flat(), ...e.tmin.flat()].filter((v) => v != null);
+    if (!vals.length) return "";
+    const lo = Math.floor((Math.min(...vals) - 2) / 10) * 10, hi = Math.ceil((Math.max(...vals) + 2) / 10) * 10;
+    const fr = plumeFrame(e, tz, lo, hi, "°", 130);
+    const hourAt = (t) => +new Date(t).toLocaleString("en-US", { timeZone: tz, hour: "numeric", hourCycle: "h23" });
+    const series = (m) => fr.hrs.map((h, s) => { const t = fr.init + (h - 3) * 3600e3, hr = hourAt(t); return [t, hr >= 9 && hr < 21 ? e.tmax[m][s] : e.tmin[m][s]]; });
+    let svg = fr.svg;
+    const all = e.tmax.map((_, m) => series(m));
+    const band = fr.hrs.map((_, s) => { const col = all.map((sr) => sr[s][1]); return [all[0][s][0], pct(col, 0.1), pct(col, 0.5), pct(col, 0.9)]; });
+    svg += `<path d="${pathOf(band.map(([t, a]) => [fr.x(t), a == null ? null : fr.y(a)]))}${band.slice().reverse().map(([t, , , b]) => `L${fr.x(t).toFixed(1)},${fr.y(b).toFixed(1)}`).join("")}Z" fill="rgba(255,191,71,.14)"/>`;
+    all.forEach((sr) => { svg += `<path d="${pathOf(sr.map(([t, v]) => [fr.x(t), v == null ? null : fr.y(v)]))}" fill="none" stroke="rgba(255,191,71,.28)" stroke-width=".7"/>`; });
+    svg += `<path d="${pathOf(band.map(([t, , md]) => [fr.x(t), md == null ? null : fr.y(md)]))}" fill="none" stroke="#ffbf47" stroke-width="2"/>`;
+    return `<svg class="chart" viewBox="0 0 ${fr.W} ${fr.H}" role="img" aria-label="Temperature forecast from each ensemble member">${svg}</svg>
+      <p class="chart-key"><span style="color:rgba(255,191,71,.6)">━</span> each member <span style="color:#ffbf47">━</span> median <span style="color:rgba(255,191,71,.5)">▮</span> 10–90% · daytime highs and overnight lows, °F</p>`;
+  }
+
+  function rainPlume(e, tz) {
+    const totals = e.apcp.map((row) => { let sum = 0; return row.map((v) => (sum += v ?? 0)); });
+    const top = Math.max(0.5, ...totals.map((r) => r[r.length - 1]));
+    const hi = top > 4 ? Math.ceil(top) : Math.ceil(top * 2) / 2;
+    const fr = plumeFrame(e, tz, 0, hi, '"', 120);
+    let svg = fr.svg;
+    const xs = fr.hrs.map((h) => fr.x(fr.init + h * 3600e3));
+    totals.forEach((r) => { svg += `<path d="${pathOf(r.map((v, s) => [xs[s], fr.y(v)]))}" fill="none" stroke="rgba(74,209,255,.32)" stroke-width=".8"/>`; });
+    const med = fr.hrs.map((_, s) => pct(totals.map((r) => r[s]), 0.5));
+    svg += `<path d="${pathOf(med.map((v, s) => [xs[s], fr.y(v)]))}" fill="none" stroke="#4ad1ff" stroke-width="2"/>`;
+    const end = totals.map((r) => r[r.length - 1]);
+    return `<svg class="chart" viewBox="0 0 ${fr.W} ${fr.H}" role="img" aria-label="Accumulated rain from each ensemble member">${svg}</svg>
+      <p class="chart-key"><span style="color:rgba(74,209,255,.6)">━</span> each member <span style="color:#4ad1ff">━</span> median · 7-day total ${pct(end, 0.5).toFixed(2)}" median, ${pct(end, 0.1).toFixed(2)}–${pct(end, 0.9).toFixed(2)}" for the middle 80%</p>`;
+  }
+
+  /** How many members keep a work window within its limits (6-hour steps, so an approximation). */
+  function ensWindowOdds(e, w, r) {
+    const init = Date.parse(e.ix.init), L = Object.fromEntries(WORK_FIELDS.map(([k]) => [k, lim(w[k])]));
+    const steps = e.ix.hours.map((h, s) => [s, init + (h - 6) * 3600e3, init + h * 3600e3]).filter(([, a, b]) => a < r.end && b > r.start).map(([s]) => s);
+    if (!steps.length) return null;
+    const rainCap = L.rain != null ? Math.max(0.02, L.rain * 6) : 0.1;
+    let ok = 0, n = 0;
+    e.tmax.forEach((_, m) => {
+      const v = steps.map((s) => [e.tmax[m][s], e.tmin[m][s], e.wind[m][s], e.apcp[m][s]]);
+      if (v.some((x) => x.includes(null))) return;
+      n++;
+      if (v.every(([tx, tn, wd, rn]) => (L.tmin == null || tn >= L.tmin - 2) && (L.tmax == null || tx <= L.tmax + 2) && (L.wind == null || wd <= L.wind) && rn <= rainCap)) ok++;
+    });
+    return n ? { ok, n } : null;
   }
 
   // —— Load ————————————————————————————————————————————————————————

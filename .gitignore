@@ -3,3 +3,4 @@ site/data.json
 site/models/
 __pycache__/
 .claude/
+site/ens/
