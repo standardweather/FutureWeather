@@ -21,8 +21,8 @@
   <meta name="color-scheme" content="dark" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <!-- Shared theme and console layout from the main site (standardweather.github.io repo). -->
-  <link rel="stylesheet" href="/css/site.css" />
-  <link rel="stylesheet" href="/css/console.css?v=1" />
+  <link rel="stylesheet" href="/css/site.css?v=20261023a" />
+  <link rel="stylesheet" href="/css/console.css?v=2" />
   <style>
     /* FutureWeather-only pieces; the shared console layout is in /css/console.css. */
     .prod { all: unset; box-sizing: border-box; display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; width: 100%; padding: 0.55rem 1.25rem;
@@ -57,7 +57,6 @@
     .limits input { min-height: 0; padding: 0.35rem 0.5rem; font: 0.82rem var(--mono); border-radius: 6px; box-shadow: none; }
     .limits label.day { flex-direction: row; align-items: center; gap: 0.45rem; font-size: 0.8rem; color: var(--text2); grid-column: 1 / -1; }
     .limits label.day input { appearance: auto; width: 0.9rem; height: 0.9rem; padding: 0; accent-color: var(--accent); }
-    #views { flex-wrap: wrap; column-gap: 1.1rem; row-gap: 0; }
     .conf-sum { margin: 0.2rem 0 0.7rem; padding: 0.15rem 0.7rem 0.45rem; border-left: 3px solid var(--accent); background: rgba(74, 209, 255, 0.05); }
     .conf-sum p { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--text2); line-height: 1.5; max-width: none; }
     .conf-sum b { color: #fff; font-weight: 600; }
@@ -80,18 +79,17 @@
 <body class="console">
   <nav class="site-nav" aria-label="Primary">
     <div class="site-nav__inner">
-      <a class="site-nav__brand" href="/">
+      <a class="site-nav__brand" href="/" title="Standard Weather home">
         <img src="/assets/logo-light.png" width="32" height="32" alt="" />
         Standard Weather
       </a>
       <ul class="site-nav__links">
-        <li><a href="/">Home</a></li>
-        <li><a href="/about.html">About</a></li>
         <li><a href="/PastWeather/">PastWeather</a></li>
         <li><a href="/NowWeather/">NowWeather</a></li>
         <li><a href="/FutureWeather/" aria-current="page">FutureWeather</a></li>
         <li><a href="/TropicalWeather/">TropicalWeather</a></li>
         <li><a href="/AviationWeather/">AviationWeather</a></li>
+        <li><a href="/about.html">About</a></li>
       </ul>
     </div>
   </nav>
@@ -107,23 +105,28 @@
       </div>
       <div class="scroll" id="panel"><p class="empty">Loading…</p></div>
       <div class="side__foot">
-        <h4>Outlooks</h4>
-        <div class="checks" id="overlays">
-          <label><input type="checkbox" data-wpc="qpf" /> Rain, 7 days</label>
-          <label><input type="checkbox" data-wpc="ero" /> Flash flood risk</label>
-          <label><input type="checkbox" data-wpc="spc" /> Severe storms</label>
-          <label><input type="checkbox" data-wpc="cpc" /> Temperature and rain, days 6–14</label>
-        </div>
-        <div class="satpick" id="eroDay" data-pick="eroDay" role="group" aria-label="Excessive rainfall outlook day" hidden><span>Flood day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button></div>
-        <div class="satpick" id="spcDay" data-pick="spcDay" role="group" aria-label="Severe weather outlook day" hidden><span>Severe day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button><button data-v="5" aria-pressed="false">6</button><button data-v="6" aria-pressed="false">7</button><button data-v="7" aria-pressed="false">8</button></div>
-        <div class="satpick" id="cpcPick" data-pick="cpcPick" role="group" aria-label="Climate Prediction Center outlook" hidden><span>Days 6–10</span><button data-v="0" aria-pressed="true">Temp</button><button data-v="1" aria-pressed="false">Rain</button><span>8–14</span><button data-v="2" aria-pressed="false">Temp</button><button data-v="3" aria-pressed="false">Rain</button></div>
         <div class="satpick" id="models" role="group" aria-label="Model"><span>Model</span></div>
-        <p class="disclaimer">Model guidance, not an official forecast. Data: NOAA GFS, GEFS ensemble, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC, SPC and CPC outlooks; point forecasts from the National Weather Service.</p>
+        <details class="sources"><summary>Data sources · model guidance, not an official forecast</summary><p>Model guidance, not an official forecast. Data: NOAA GFS, GEFS ensemble, National Blend of Models and HRRR via AWS Open Data; ECMWF open data (CC BY 4.0); WPC, SPC and CPC outlooks; point forecasts from the National Weather Service.</p></details>
       </div>
     </aside>
 
     <section class="stage" aria-label="Map">
       <div id="map"></div>
+      <details class="layers" id="layerBox">
+        <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 13 10 5 10-5"/></svg> Layers</summary>
+        <div class="layers__body">
+          <h4>Outlooks</h4>
+          <div class="checks" id="overlays">
+            <label><input type="checkbox" data-wpc="qpf" /> Rain, 7 days</label>
+            <label><input type="checkbox" data-wpc="ero" /> Flash flood risk</label>
+            <label><input type="checkbox" data-wpc="spc" /> Severe storms</label>
+            <label><input type="checkbox" data-wpc="cpc" /> Temperature and rain, days 6–14</label>
+          </div>
+          <div class="satpick" id="eroDay" data-pick="eroDay" role="group" aria-label="Excessive rainfall outlook day" hidden><span>Flood day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button></div>
+          <div class="satpick" id="spcDay" data-pick="spcDay" role="group" aria-label="Severe weather outlook day" hidden><span>Severe day</span><button data-v="0" aria-pressed="true">1</button><button data-v="1" aria-pressed="false">2</button><button data-v="2" aria-pressed="false">3</button><button data-v="3" aria-pressed="false">4</button><button data-v="4" aria-pressed="false">5</button><button data-v="5" aria-pressed="false">6</button><button data-v="6" aria-pressed="false">7</button><button data-v="7" aria-pressed="false">8</button></div>
+          <div class="satpick" id="cpcPick" data-pick="cpcPick" role="group" aria-label="Climate Prediction Center outlook" hidden><span>Days 6–10</span><button data-v="0" aria-pressed="true">Temp</button><button data-v="1" aria-pressed="false">Rain</button><span>8–14</span><button data-v="2" aria-pressed="false">Temp</button><button data-v="3" aria-pressed="false">Rain</button></div>
+        </div>
+      </details>
       <div id="map2" aria-label="Comparison map"></div>
       <div class="maptag" id="tag1" hidden></div><div class="maptag" id="tag2" hidden></div>
       <div class="status" id="status" hidden></div>
@@ -142,6 +145,6 @@
   </footer>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>
