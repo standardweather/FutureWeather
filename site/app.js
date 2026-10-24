@@ -606,7 +606,7 @@
     syncUrl();
   }
 
-  // —— Place search (Census TIGERweb, USGS GNIS, Census Geocoder; same as PastWeather) ——————
+  // —— Place search (Census TIGERweb, USGS GNIS, Census Geocoder; same as ForensicWeather) ——————
   function parseLatLon(text) {
     const m = text.trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
     if (!m) return null;
