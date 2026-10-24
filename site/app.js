@@ -5,11 +5,15 @@
  *   GEFS          NOAA's 31-member ensemble at the point, for forecast confidence (tiles packed by make_ensemble.py)
  *   WPC, SPC, CPC 7-day rainfall, excessive rainfall, day 1–8 severe and 6–14 day outlooks (NOAA map services, drawn live)
  *   Census TIGERweb / Geocoder, USGS GNIS   place search
+ *
+ * The work-window engine, the GEFS tile reader and place search are shared with FarmWeather, in /js/workwindows.js
+ * and /js/geocode.js on the main site.
  */
 (() => {
   "use strict";
 
   const NWS = "https://api.weather.gov";
+  const WW = window.WorkWindows, lim = WW.lim;   // shared with FarmWeather: /js/workwindows.js, /js/geocode.js
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const pad = (n, w = 2) => String(n).padStart(w, "0");
@@ -292,19 +296,6 @@
         <a href="${esc(f.link)}" target="_blank" rel="noopener">Full forecast at weather.gov ↗</a></p></div>`;
   }
 
-  /** Hourly series from the NWS forecast grid ("2026-10-20T18:00:00+00:00/PT3H" intervals spread over each hour). */
-  function gridSeries(prop, convert = (v) => v, spread = false) {
-    const out = new Map();
-    for (const { validTime, value } of prop?.values || []) {
-      if (value == null) continue;
-      const [start, dur] = validTime.split("/");
-      const m = dur.match(/P(?:(\d+)D)?T?(?:(\d+)H)?/);
-      const hours = Math.max(1, (+(m?.[1] || 0)) * 24 + (+(m?.[2] || 0)));
-      const t0 = Date.parse(start);
-      for (let i = 0; i < hours; i++) out.set(t0 + i * 3600e3, convert(spread ? value / hours : value));
-    }
-    return out;
-  }
   function meteogram(g) {
     const now = Math.floor(Date.now() / 3600e3) * 3600e3, end = now + 7 * 86400e3;
     const hours = [];
@@ -405,51 +396,6 @@
     return w;
   }
   state.work = workFromUrl();
-  const lim = (v) => (v === "" || v == null || !Number.isFinite(+v) ? null : +v);
-
-  /** Each hour in the next 7 days with what (if anything) rules it out. Daylight comes from the sun's elevation. */
-  function workHours(pt, w) {
-    const g = pt.grid, now = Math.floor(Date.now() / 3600e3) * 3600e3, out = [];
-    const L = Object.fromEntries(WORK_FIELDS.map(([f]) => [f, lim(w[f])]));
-    for (let t = now; t < now + 7 * 86400e3; t += 3600e3) {
-      const v = (k) => (g[k]?.has(t) ? g[k].get(t) : null);
-      const temp = v("temp");
-      if (temp == null) { out.push({ t, fail: ["no forecast"], nodata: true }); continue; }
-      const fail = [];
-      if (w.day && sunElevation(t + 1800e3, pt.lat, pt.lon) < -0.833) fail.push("dark");
-      if (L.tmin != null && temp < L.tmin) fail.push(`${Math.round(temp)}°F`);
-      if (L.tmax != null && temp > L.tmax) fail.push(`${Math.round(temp)}°F`);
-      if (L.wind != null && (v("wind") ?? 0) > L.wind) fail.push(`wind ${Math.round(v("wind"))} mph`);
-      if (L.gust != null && (v("gust") ?? 0) > L.gust) fail.push(`gusts ${Math.round(v("gust"))} mph`);
-      if (L.pop != null && (v("pop") ?? 0) > L.pop) fail.push(`${Math.round(v("pop"))}% precip`);
-      if (L.rain != null && (v("qpf") ?? 0) > L.rain + 1e-6) fail.push(`${(v("qpf") ?? 0).toFixed(2)}" rain`);
-      if (L.rh != null && (v("rh") ?? 0) > L.rh) fail.push(`${Math.round(v("rh"))}% humidity`);
-      if (L.thunder != null && (v("thunder") ?? 0) > L.thunder) fail.push(`${Math.round(v("thunder"))}% thunder`);
-      out.push({ t, fail, temp, wind: v("wind"), gust: v("gust"), pop: v("pop") });
-    }
-    return out;
-  }
-  /** Solar elevation in degrees (NOAA's simplified equations, good to a fraction of a degree). */
-  function sunElevation(ms, lat, lon) {
-    const d = ms / 86400e3 - 10957.5, r = Math.PI / 180;
-    const g = (357.529 + 0.98560028 * d) * r, q = 280.459 + 0.98564736 * d;
-    const L = (q + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * r, e = (23.439 - 0.00000036 * d) * r;
-    const dec = Math.asin(Math.sin(e) * Math.sin(L));
-    const ra = Math.atan2(Math.cos(e) * Math.sin(L), Math.cos(L)) / r;
-    const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
-    const ha = ((gmst * 15 + lon - ra) % 360) * r;
-    return Math.asin(Math.sin(lat * r) * Math.sin(dec) + Math.cos(lat * r) * Math.cos(dec) * Math.cos(ha)) / r;
-  }
-  function workWindows(hours, minH) {
-    const out = [];
-    let run = null;
-    hours.forEach((h) => {
-      if (!h.fail.length) { if (!run) run = { start: h.t, end: h.t + 3600e3, hrs: [] }; run.end = h.t + 3600e3; run.hrs.push(h); }
-      else { if (run) out.push(run); run = null; }
-    });
-    if (run) out.push(run);
-    return out.filter((r) => r.hrs.length >= Math.max(1, minH || 1));
-  }
 
   function workSummary(w) {
     const L = (k) => lim(w[k]);
@@ -471,9 +417,9 @@
     if (!f) return html + `<p class="empty">Search a place or click the map to check it.</p>`;
     if (!f.grid) return html + `<p class="empty">Loading the forecast grid for ${esc(f.place)}…</p>`;
     if (!f.ens) loadConfidence(f);
-    const hours = workHours(f, w);
+    const hours = WW.workHours(f.grid, f.lat, f.lon, w);
     if (hours.every((h) => h.nodata)) return html + `<p class="empty">No forecast grid for this spot.</p>`;
-    const wins = workWindows(hours, lim(w.hours));
+    const wins = WW.workWindows(hours, lim(w.hours));
     const tz = f.tz || undefined;
     const fmt = (t, o) => new Date(t).toLocaleString("en-US", { timeZone: tz, ...o });
     const span = (r) => `${fmt(r.start, { weekday: "short", hour: "numeric" })}–${fmt(r.end, { hour: "numeric", timeZoneName: "short" })}`;
@@ -483,7 +429,7 @@
     const ok = hours.filter((h) => !h.fail.length).length;
     html += `<div class="pad" style="padding-top:0"><h5 class="sub">${esc(f.place)} · next 7 days</h5>`;
     html += wins.length
-      ? `<table class="t"><tbody>${wins.map((r) => { const odds = f.ens?.tmax ? ensWindowOdds(f.ens, w, r) : null; return `<tr><td><b style="color:#fff">${esc(span(r))}</b>${odds ? `<span class="odds" title="GEFS ensemble members that keep this window within the temperature, wind and rain limits">${odds.ok} of ${odds.n} members agree</span>` : ""}<small>${r.hrs.length} h · ${Math.round(Math.min(...r.hrs.map((h) => h.temp)))}–${Math.round(Math.max(...r.hrs.map((h) => h.temp)))}°F · wind to ${Math.round(Math.max(...r.hrs.map((h) => h.wind ?? 0)))} mph${r.hrs.some((h) => h.gust != null) ? `, gusts ${Math.round(Math.max(...r.hrs.map((h) => h.gust ?? 0)))}` : ""} · precip ≤ ${Math.round(Math.max(...r.hrs.map((h) => h.pop ?? 0)))}%</small></td></tr>`; }).join("")}</tbody></table>`
+      ? `<table class="t"><tbody>${wins.map((r) => { const odds = f.ens?.tmax ? WW.ensWindowOdds(f.ens, w, r) : null; return `<tr><td><b style="color:#fff">${esc(span(r))}</b>${odds ? `<span class="odds" title="GEFS ensemble members that keep this window within the temperature, wind and rain limits">${odds.ok} of ${odds.n} members agree</span>` : ""}<small>${r.hrs.length} h · ${Math.round(Math.min(...r.hrs.map((h) => h.temp)))}–${Math.round(Math.max(...r.hrs.map((h) => h.temp)))}°F · wind to ${Math.round(Math.max(...r.hrs.map((h) => h.wind ?? 0)))} mph${r.hrs.some((h) => h.gust != null) ? `, gusts ${Math.round(Math.max(...r.hrs.map((h) => h.gust ?? 0)))}` : ""} · precip ≤ ${Math.round(Math.max(...r.hrs.map((h) => h.pop ?? 0)))}%</small></td></tr>`; }).join("")}</tbody></table>`
       : `<p class="note"><b>No window of ${lim(w.hours) || 1}+ hours</b> meets these limits in the next 7 days.</p>`;
     // Day-by-hour strip: green hours qualify.
     const days = [];
@@ -545,7 +491,7 @@
     state.point = "loading";
     render();
     try {
-      const hit = await geocodePlace(state.query);
+      const hit = await Geocode.place(state.query);
       map.setView([hit.lat, hit.lon], Math.max(map.getZoom(), 6), { animate: false });
       await showForecast(hit.lat, hit.lon);
     } catch (err) { state.point = null; state.pointError = err.message; render(); }
@@ -584,17 +530,10 @@
         grid: null,
       };
       const pt = state.point;
-      try { localStorage.setItem("sw-place", JSON.stringify({ label: state.query && !parseLatLon(state.query) ? state.query : pt.place, lat, lon })); } catch { /* private mode */ }
+      try { localStorage.setItem("sw-place", JSON.stringify({ label: state.query && !Geocode.parseLatLon(state.query) ? state.query : pt.place, lat, lon })); } catch { /* private mode */ }
       fetch(pr.forecastGridData).then((r) => r.json()).then((d) => {
         if (state.point !== pt) return;
-        const p = d.properties, f2c = (c) => c * 9 / 5 + 32, kmh = (v) => v / 1.60934;
-        pt.grid = {
-          temp: gridSeries(p.temperature, f2c), dew: gridSeries(p.dewpoint, f2c),
-          wind: gridSeries(p.windSpeed, kmh), gust: gridSeries(p.windGust, kmh),
-          sky: gridSeries(p.skyCover), pop: gridSeries(p.probabilityOfPrecipitation),
-          qpf: gridSeries(p.quantitativePrecipitation, (mm) => mm / 25.4, true),
-          rh: gridSeries(p.relativeHumidity), thunder: gridSeries(p.probabilityOfThunder),
-        };
+        pt.grid = WW.gridFrom(d.properties);
 
         if (state.view !== "maps") render();
       }).catch(() => { if (state.point === pt) { pt.grid = { temp: new Map(), dew: new Map() }; if (state.view !== "maps") render(); } });
@@ -606,148 +545,13 @@
     syncUrl();
   }
 
-  // —— Place search (Census TIGERweb, USGS GNIS, Census Geocoder; same as ForensicWeather) ——————
-  function parseLatLon(text) {
-    const m = text.trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
-    if (!m) return null;
-    const lat = Number(m[1]), lon = Number(m[2]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
-    return { lat, lon };
-  }
-  const STATES = [
-    ["AL", "01", "Alabama"], ["AK", "02", "Alaska"], ["AZ", "04", "Arizona"], ["AR", "05", "Arkansas"],
-    ["CA", "06", "California"], ["CO", "08", "Colorado"], ["CT", "09", "Connecticut"], ["DE", "10", "Delaware"],
-    ["DC", "11", "District of Columbia"], ["FL", "12", "Florida"], ["GA", "13", "Georgia"], ["HI", "15", "Hawaii"],
-    ["ID", "16", "Idaho"], ["IL", "17", "Illinois"], ["IN", "18", "Indiana"], ["IA", "19", "Iowa"],
-    ["KS", "20", "Kansas"], ["KY", "21", "Kentucky"], ["LA", "22", "Louisiana"], ["ME", "23", "Maine"],
-    ["MD", "24", "Maryland"], ["MA", "25", "Massachusetts"], ["MI", "26", "Michigan"], ["MN", "27", "Minnesota"],
-    ["MS", "28", "Mississippi"], ["MO", "29", "Missouri"], ["MT", "30", "Montana"], ["NE", "31", "Nebraska"],
-    ["NV", "32", "Nevada"], ["NH", "33", "New Hampshire"], ["NJ", "34", "New Jersey"], ["NM", "35", "New Mexico"],
-    ["NY", "36", "New York"], ["NC", "37", "North Carolina"], ["ND", "38", "North Dakota"], ["OH", "39", "Ohio"],
-    ["OK", "40", "Oklahoma"], ["OR", "41", "Oregon"], ["PA", "42", "Pennsylvania"], ["RI", "44", "Rhode Island"],
-    ["SC", "45", "South Carolina"], ["SD", "46", "South Dakota"], ["TN", "47", "Tennessee"], ["TX", "48", "Texas"],
-    ["UT", "49", "Utah"], ["VT", "50", "Vermont"], ["VA", "51", "Virginia"], ["WA", "53", "Washington"],
-    ["WV", "54", "West Virginia"], ["WI", "55", "Wisconsin"], ["WY", "56", "Wyoming"], ["PR", "72", "Puerto Rico"],
-  ];
-  function findState(s) {
-    const t = s.trim().replace(/\./g, "").toLowerCase();
-    return STATES.find(([code, , name]) => code.toLowerCase() === t || name.toLowerCase() === t) || null;
-  }
-  function splitPlace(text) {
-    const comma = text.lastIndexOf(",");
-    if (comma > 0) {
-      const st = findState(text.slice(comma + 1));
-      if (st) return { name: text.slice(0, comma).trim(), state: st };
-    }
-    for (const words of [2, 1]) {
-      const parts = text.trim().split(/\s+/);
-      if (parts.length <= words) continue;
-      const st = findState(parts.slice(-words).join(" "));
-      if (st) return { name: parts.slice(0, -words).join(" "), state: st };
-    }
-    return { name: text.trim(), state: null };
-  }
-  const sqlString = (s) => "'" + s.toUpperCase().replace(/'/g, "''") + "'";
-
-  async function arcgisQuery(url, params) {
-    const u = new URL(url);
-    for (const [k, v] of Object.entries({ f: "json", ...params })) u.searchParams.set(k, v);
-    const res = await fetch(u.toString());
-    if (!res.ok) throw new Error(`Place search failed (${res.status})`);
-    const json = await res.json();
-    if (json.error) throw new Error(json.error.message || "Place search failed");
-    return json.features || [];
-  }
-  async function searchTigerPlaces(name, st) {
-    const base = "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/Places_CouSub_ConCity_SubMCD/MapServer";
-    const where = `UPPER(BASENAME)=${sqlString(name)}` + (st ? ` AND STATE='${st[1]}'` : "");
-    const params = { where, outFields: "BASENAME,STATE,INTPTLAT,INTPTLON,AREALAND", returnGeometry: "false" };
-    const results = await Promise.all([4, 5].map((layer) => arcgisQuery(`${base}/${layer}/query`, params).catch(() => [])));
-    const hits = results.flat().map((f) => f.attributes);
-    if (!hits.length) return null;
-    hits.sort((a, b) => (b.AREALAND || 0) - (a.AREALAND || 0));   // without a state, the largest place is the likeliest
-    const h = hits[0];
-    const s = STATES.find(([, fips]) => fips === h.STATE);
-    return { label: `${h.BASENAME}${s ? ", " + s[0] : ""}`, lat: Number(h.INTPTLAT), lon: Number(h.INTPTLON) };
-  }
-  async function searchGnis(name, st) {
-    const where = `UPPER(gaz_name)=${sqlString(name)}` + (st ? ` AND state_alpha='${st[0]}'` : "");
-    const features = await arcgisQuery("https://carto.nationalmap.gov/arcgis/rest/services/geonames/MapServer/3/query", {
-      where, outFields: "gaz_name,state_alpha", returnGeometry: "true", outSR: "4326",
-    });
-    const f = features.find((x) => x.geometry && x.geometry.points && x.geometry.points.length);
-    if (!f) return null;
-    const [lon, lat] = f.geometry.points[0];
-    return { label: `${f.attributes.gaz_name}, ${f.attributes.state_alpha}`, lat, lon };
-  }
-  /** The Census Geocoder sends no CORS headers, so it is called with JSONP. Street addresses only. */
-  function searchCensusAddress(text) {
-    return new Promise((resolve, reject) => {
-      const cb = "fwCensus" + Math.random().toString(36).slice(2);
-      const u = new URL("https://geocoding.geo.census.gov/geocoder/locations/onelineaddress");
-      u.searchParams.set("address", text);
-      u.searchParams.set("benchmark", "Public_AR_Current");
-      u.searchParams.set("format", "jsonp");
-      u.searchParams.set("callback", cb);
-      const script = document.createElement("script");
-      const timer = setTimeout(() => done(new Error("Address search timed out")), 12000);
-      function done(err, value) { clearTimeout(timer); delete window[cb]; script.remove(); err ? reject(err) : resolve(value); }
-      window[cb] = (data) => {
-        const m = data?.result?.addressMatches?.[0];
-        done(null, m ? { label: m.matchedAddress, lat: m.coordinates.y, lon: m.coordinates.x } : null);
-      };
-      script.onerror = () => done(new Error("Address search failed"));
-      script.src = u.toString();
-      document.head.appendChild(script);
-    });
-  }
-  async function geocodePlace(q) {
-    const text = q.trim();
-    if (!text) throw new Error("Enter a location or lat, lon");
-    const direct = parseLatLon(text);
-    if (direct) return { label: `${direct.lat.toFixed(4)}, ${direct.lon.toFixed(4)}`, ...direct };
-    let hit = null;
-    if (/^\d/.test(text)) hit = await searchCensusAddress(text).catch(() => null);
-    else {
-      const { name, state: st } = splitPlace(text);
-      hit = (await searchTigerPlaces(name, st).catch(() => null)) || (await searchGnis(name, st).catch(() => null)) ||
-        (await searchCensusAddress(text).catch(() => null));
-    }
-    if (!hit || !Number.isFinite(hit.lat) || !Number.isFinite(hit.lon)) throw new Error("Place not found. Try “City, ST”, a street address, or lat, lon.");
-    return hit;
-  }
-
   // —— Forecast confidence: the NOAA GEFS ensemble at the point (tiles packed by make_ensemble.py) ——————————
   // 31 runs of the GFS from slightly different starts. Each step covers the 6 hours before it.
   const ENS_RAIN = 0.05;   // inches in a day that count as "rain" for a member
-  async function loadEnsIndex() {
-    if (!state.ensIndex) state.ensIndex = fetch(`ens/index.json?t=${Date.now()}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-    return state.ensIndex;
-  }
-  const ensTiles = new Map();
-  /** Every member's series at the grid point nearest (lat, lon): { tmax, tmin, wind, apcp }[member][step], or null outside the grid. */
-  async function ensAt(lat, lon) {
-    const ix = await loadEnsIndex();
-    if (!ix) throw new Error("The ensemble hasn't been published yet.");
-    const g = ix.grid, M = ix.members.length, S = ix.hours.length;
-    const r = Math.round((g.north - lat) / g.res), c = Math.round((lon - g.west) / g.res);
-    if (r < 0 || c < 0 || r >= g.nlat || c >= g.nlon) return null;
-    const key = `${Math.floor(r / g.tile)}_${Math.floor(c / g.tile)}`;
-    if (!ensTiles.has(key)) ensTiles.set(key, fetch(`ens/${key}.bin?run=${encodeURIComponent(ix.cycle)}`).then((x) => { if (!x.ok) throw new Error(`ensemble tile ${x.status}`); return x.arrayBuffer(); }));
-    const buf = await ensTiles.get(key).catch((e) => { ensTiles.delete(key); throw e; });
-    const block = M * S * 5, at = ((r % g.tile) * g.tile + (c % g.tile)) * block;
-    const u8 = new Uint8Array(buf, at, M * S * 3), dv = new DataView(buf, at + M * S * 3, M * S * 2);
-    const series = (k, off) => Array.from({ length: M }, (_, m) => Array.from({ length: S }, (_, s) => { const v = u8[k * M * S + m * S + s]; return v === 255 ? null : v - off; }));
-    return {
-      ix, lat: g.north - r * g.res, lon: g.west + c * g.res,
-      tmax: series(0, 80), tmin: series(1, 80), wind: series(2, 0),
-      apcp: Array.from({ length: M }, (_, m) => Array.from({ length: S }, (_, s) => { const v = dv.getUint16((m * S + s) * 2, true); return v === 65535 ? null : v / 100; })),
-    };
-  }
   async function loadConfidence(pt) {
     if (pt.ens) return;
     pt.ens = "loading";
-    try { pt.ens = (await ensAt(pt.lat, pt.lon)) || { error: "The ensemble covers the lower 48 states only." }; }
+    try { pt.ens = (await WW.ensAt(pt.lat, pt.lon, "ens/")) || { error: "The ensemble covers the lower 48 states only." }; }
     catch (e) { pt.ens = { error: e.message }; }
     if (state.point === pt && ["confidence", "windows"].includes(state.view)) render();
   }
@@ -878,22 +682,6 @@
     const end = totals.map((r) => r[r.length - 1]);
     return `<svg class="chart" viewBox="0 0 ${fr.W} ${fr.H}" role="img" aria-label="Accumulated rain from each ensemble member">${svg}</svg>
       <p class="chart-key"><span style="color:rgba(74,209,255,.6)">━</span> each member <span style="color:#4ad1ff">━</span> median · 7-day total ${pct(end, 0.5).toFixed(2)}" median, ${pct(end, 0.1).toFixed(2)}–${pct(end, 0.9).toFixed(2)}" for the middle 80%</p>`;
-  }
-
-  /** How many members keep a work window within its limits (6-hour steps, so an approximation). */
-  function ensWindowOdds(e, w, r) {
-    const init = Date.parse(e.ix.init), L = Object.fromEntries(WORK_FIELDS.map(([k]) => [k, lim(w[k])]));
-    const steps = e.ix.hours.map((h, s) => [s, init + (h - 6) * 3600e3, init + h * 3600e3]).filter(([, a, b]) => a < r.end && b > r.start).map(([s]) => s);
-    if (!steps.length) return null;
-    const rainCap = L.rain != null ? Math.max(0.02, L.rain * 6) : 0.1;
-    let ok = 0, n = 0;
-    e.tmax.forEach((_, m) => {
-      const v = steps.map((s) => [e.tmax[m][s], e.tmin[m][s], e.wind[m][s], e.apcp[m][s]]);
-      if (v.some((x) => x.includes(null))) return;
-      n++;
-      if (v.every(([tx, tn, wd, rn]) => (L.tmin == null || tn >= L.tmin - 2) && (L.tmax == null || tx <= L.tmax + 2) && (L.wind == null || wd <= L.wind) && rn <= rainCap)) ok++;
-    });
-    return n ? { ok, n } : null;
   }
 
   // —— Load ————————————————————————————————————————————————————————
