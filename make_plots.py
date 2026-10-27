@@ -11,6 +11,7 @@ byte offsets in each file's .idx index):
 
 Output, per model:
   site/img/<model>/<product>_f<hhh>.png   one transparent overlay per product per forecast hour
+  site/img/<model>/surface_f<hhh>.json    forecast station plot values for the Surface map (see site/stations.json)
   site/models/<model>.json                run info, products and legends
 
 Overlays are drawn in Web Mercator over BOUNDS, so the page lays them straight onto its Leaflet map.
@@ -34,6 +35,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.colors as mcolors
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import metpy.calc as mpcalc
 import numpy as np
@@ -41,6 +43,7 @@ import requests
 import xarray as xr
 from PIL import Image
 from scipy.ndimage import gaussian_filter
+from scipy.spatial import cKDTree
 
 OUT = Path(__file__).parent / "site"
 
@@ -139,6 +142,18 @@ CAPE = binned(CAPE_LEVELS, ["#2b4f6f", "#2f7fa8", "#3fcf9a", "#9be15d", "#f6e33c
 
 UH_LEVELS = [25, 50, 75, 100, 150, 200, 300]
 UH = binned(UH_LEVELS, ["#4ad1ff", "#8f6bff", "#ffd166", "#ff9f43", "#ff453a", "#ff7ab8"])
+
+# Surface map: cloud cover in grays (clear sky leaves the dark base map showing), with precipitation rate
+# on top in one ramp per type, light to heavy.
+SKY_LEVELS = [10, 20, 40, 60, 80, 90, 100]
+SKY = binned(SKY_LEVELS, ["#34373f", "#454851", "#5b5e67", "#74777f", "#92959c", "#b4b6bb"])
+RATE_LEVELS = [0.004, 0.01, 0.03, 0.1, 0.25, 0.5, 1, 2]   # in/h; 0.004 is about 0.1 mm/h
+PTYPES = [  # (code, name, colors). Codes are what the station files and draw_surface use.
+    (1, "Rain", ["#a8eda0", "#5cd25c", "#1f9a3a", "#f6e33c", "#f2902a", "#d42020", "#e040e0"]),
+    (2, "Snow", ["#c9f0ff", "#8fd8ff", "#4ab3ff", "#2f7fe8", "#2450c8", "#1f2fa0", "#4a1f8a"]),
+    (3, "Ice pellets", ["#e6d0ff", "#c9a8f5", "#ad84e8", "#9060d8", "#7440c0", "#5a28a0", "#401480"]),
+    (4, "Freezing rain", ["#ffd0e4", "#ffa0c8", "#ff6fae", "#f03c90", "#c81e70", "#9a0f55", "#6e063c"]),
+]
 
 # NWS radar colors.
 REFL_LEVELS = list(range(5, 80, 5))
@@ -305,7 +320,15 @@ def gfs_fields(fhr):
         "tcdc": f"TCDC:entire atmosphere:{fhr} hour fcst",
         "ceil": "HGT:cloud ceiling:",
         "frzl": "HGT:0C isotherm:",
+        "t2m": "TMP:2 m above ground:",
+        "d2m": "DPT:2 m above ground:",
+        "u10": "UGRD:10 m above ground:",
+        "v10": "VGRD:10 m above ground:",
+        "gust": f"GUST:surface:{fhr} hour fcst",
+        "prate": f"PRATE:surface:{fhr} hour fcst",   # the rate at the valid time, not the 6-hour average
     }
+    for var in ("CRAIN", "CSNOW", "CICEP", "CFRZR"):
+        wanted[var.lower()] = f"{var}:surface:{fhr} hour fcst"
     for lev in {700, 200} | {lev for pair in TURB_LAYERS for lev in pair}:
         for var, key in (("HGT", "z"), ("UGRD", "u"), ("VGRD", "v")):
             wanted[f"{key}{lev}"] = f"{var}:{lev} mb:"
@@ -461,6 +484,13 @@ def hrrr_fields(fhr):
         "ushr": f"VUCSH:0-6000 m above ground:{fhr} hour fcst$",
         "vshr": f"VVCSH:0-6000 m above ground:{fhr} hour fcst$",
         "uh": f"MXUPHL:5000-2000 m above ground:{fhr - 1}-{fhr} hour max fcst$",
+        "tcc": f"TCDC:entire atmosphere:{fhr} hour fcst$",
+        "mslp": f"MSLMA:mean sea level:{fhr} hour fcst$",
+        "d2m": f"DPT:2 m above ground:{fhr} hour fcst$",
+        "u10": f"UGRD:10 m above ground:{fhr} hour fcst$",
+        "v10": f"VGRD:10 m above ground:{fhr} hour fcst$",
+        "prate": f"PRATE:surface:{fhr} hour fcst$",
+        **{var.lower(): f"{var}:surface:{fhr} hour fcst$" for var in ("CRAIN", "CSNOW", "CICEP", "CFRZR")},
     }
 
 
@@ -487,7 +517,9 @@ def ecmwf_url(cycle, fhr):
 def ecmwf_fields(fhr):
     """(param, level) pairs. Precipitation is accumulated from the start of the run, so the 6-hour
     total needs the previous step's file too ("tp_prev")."""
-    wanted = {"mslp": ("msl", None), "tp": ("tp", None), "t2m": ("2t", None)}
+    wanted = {"mslp": ("msl", None), "tp": ("tp", None), "t2m": ("2t", None), "d2m": ("2d", None),
+              "u10": ("10u", None), "v10": ("10v", None), "gust": ("10fg", None), "tcc": ("tcc", None),
+              "ptype": ("ptype", None), "tprate": ("tprate", None)}
     for lev in (700, 200):
         for var, key in (("gh", "z"), ("u", "u"), ("v", "v")):
             wanted[f"{key}{lev}"] = (var, str(lev))
@@ -519,6 +551,132 @@ def ecmwf_get(url, wanted, subset=None):
     return f
 
 
+# ---------------------------------------------------------------- Surface map
+# Cloud cover, precipitation rate by type and sea-level pressure in the overlay, plus forecast station plots.
+# The station plots are drawn by the page from a small JSON file per hour, so they stay sharp at every zoom
+# and thin out to fit. Each model's fields are first put in common units by a "prep" function:
+#   tcc %, rate mm/h, ptype (0 none, 1 rain, 2 snow, 3 ice pellets, 4 freezing rain), mslp hPa,
+#   t2m and d2m K, u10/v10 earth-relative m/s, gust m/s
+
+STATIONS = json.loads((OUT / "stations.json").read_text()) if (OUT / "stations.json").exists() else []
+
+
+def unit_xyz(lat, lon):
+    lat, lon = np.radians(lat), np.radians(lon)
+    return np.column_stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+
+
+def nearest_points(da):
+    """Flat grid index of the point nearest each station, or -1 where the grid doesn't reach it."""
+    if da.latitude.ndim == 1:
+        lon, lat = np.meshgrid(da.longitude.values, da.latitude.values)
+    else:
+        lon, lat = da.longitude.values, da.latitude.values
+    tree = cKDTree(unit_xyz(lat.ravel(), (lon.ravel() + 180) % 360 - 180))
+    dist, idx = tree.query(unit_xyz([s[1] for s in STATIONS], [s[2] for s in STATIONS]))
+    return np.where(dist < np.radians(0.3), idx, -1)
+
+
+def noaa_ptype(f):
+    """NOAA's yes/no precipitation-type flags, most hazardous first when more than one is set."""
+    code = np.zeros(f["crain"].shape, dtype=int)
+    for key, c in (("crain", 1), ("csnow", 2), ("cicep", 3), ("cfrzr", 4)):
+        code = np.where(f[key].values >= 0.5, c, code)
+    return code
+
+
+def gfs_surface_prep(f):
+    return {"grid": f["mslp"], "tcc": f["tcdc"].values, "rate": f["prate"].values * 3600, "ptype": noaa_ptype(f),
+            "mslp": gaussian_filter(f["mslp"].values / 100, sigma=1.5), "t2m": f["t2m"].values, "d2m": f["d2m"].values,
+            "u10": f["u10"].values, "v10": f["v10"].values, "gust": f["gust"].values}
+
+
+# HRRR winds are relative to its Lambert conformal grid (true at 38.5°N, centered on 97.5°W) and must be
+# turned to true north before they are plotted.
+HRRR_CONE = np.sin(np.radians(38.5))
+
+
+def hrrr_surface_prep(f):
+    lon = (f["u10"].longitude.values + 180) % 360 - 180
+    a = np.radians(HRRR_CONE * (lon + 97.5))
+    u, v = f["u10"].values, f["v10"].values
+    return {"grid": f["t2m"], "tcc": f["tcc"].values, "rate": f["prate"].values * 3600, "ptype": noaa_ptype(f),
+            "mslp": gaussian_filter(f["mslp"].values / 100, sigma=3), "t2m": f["t2m"].values, "d2m": f["d2m"].values,
+            "u10": np.cos(a) * u + np.sin(a) * v, "v10": -np.sin(a) * u + np.cos(a) * v, "gust": f["gust"].values}
+
+
+# ECMWF precipitation type codes -> ours. Wet snow and rain-snow mix count as snow; freezing drizzle as
+# freezing rain.
+ECMWF_PTYPE = {1: 1, 3: 4, 5: 2, 6: 2, 7: 2, 8: 3, 12: 4}
+
+
+def ecmwf_surface_prep(f):
+    tcc = f["tcc"].values
+    ptype = np.zeros(tcc.shape, dtype=int)
+    for theirs, ours in ECMWF_PTYPE.items():
+        ptype[np.round(np.nan_to_num(f["ptype"].values)) == theirs] = ours
+    return {"grid": f["mslp"], "tcc": tcc * 100 if np.nanmax(tcc) <= 1.01 else tcc, "rate": f["tprate"].values * 3600,
+            "ptype": ptype, "mslp": gaussian_filter(f["mslp"].values / 100, sigma=1.5), "t2m": f["t2m"].values,
+            "d2m": f["d2m"].values, "u10": f["u10"].values, "v10": f["v10"].values, "gust": f["gust"].values}
+
+
+def surface(prep):
+    def draw(f, path):
+        s = prep(f)
+        x, y = lonlat(s["grid"])
+        rate = s["rate"] / 25.4   # mm/h -> in/h
+        # Wet spots with no type flagged (rare, at type boundaries) are drawn as rain.
+        ptype = np.where((s["ptype"] == 0) & (rate >= RATE_LEVELS[0]), 1, s["ptype"])
+        fig, ax = new_overlay()
+        shade(ax, x, y, s["tcc"], SKY)
+        rate = np.minimum(rate, RATE_LEVELS[-1] * 0.999)   # the top bin also holds anything heavier
+        for code, _, colors in PTYPES:
+            if (ptype == code).any():
+                shade(ax, x, y, np.where(ptype == code, rate, np.nan), binned(RATE_LEVELS, colors))
+        # White lines with a dark edge read over both clear (dark) and overcast (light gray) areas.
+        halo = [pe.withStroke(linewidth=2.6, foreground="#0b1022")]
+        cs = ax.contour(x, y, s["mslp"], levels=np.arange(940, 1061, 4), colors="#ffffff", linewidths=1, zorder=4)
+        cs.set(path_effects=halo)
+        for t in ax.clabel(cs, fmt="%d", fontsize=8, inline=True, inline_spacing=2):
+            t.set_path_effects(halo)
+        save(fig, path)
+        write_stations(s, ptype, s["rate"] / 25.4, path.with_suffix(".json"))
+    return draw
+
+
+def write_stations(s, ptype, rate, path):
+    """One row per station in site/stations.json: [temp °F, dew point °F, pressure (tenths of hPa), sky %,
+    wind direction °, wind kt, gust kt, precip type, rate (hundredths of in/h)], or null off the grid."""
+    idx = nearest_points(s["grid"])
+    pick = lambda a: np.asarray(a).ravel()[np.maximum(idx, 0)]
+    t, d = K_TO_F(pick(s["t2m"])), K_TO_F(pick(s["d2m"]))
+    u, v = pick(s["u10"]), pick(s["v10"])
+    spd = np.hypot(u, v) * 1.94384
+    wdir = (270 - np.degrees(np.arctan2(v, u))) % 360
+    wdir = np.where(np.round(wdir / 10) == 0, 360, np.round(wdir / 10) * 10)
+    cols = [t, d, pick(s["mslp"]) * 10, pick(s["tcc"]), wdir, spd, pick(s["gust"]) * 1.94384, pick(ptype), pick(rate) * 100]
+    rows = []
+    for i in range(len(STATIONS)):
+        vals = [c[i] for c in cols]
+        rows.append(None if idx[i] < 0 or not np.isfinite(vals).all() else [int(round(float(v))) for v in vals])
+    path.write_text(json.dumps(rows, separators=(",", ":")))
+
+
+SURFACE_NOTE = ("Gray shading is cloud cover; color is the precipitation rate at the valid time, by type. "
+                "Station plots: temperature (red) and dew point (green) in °F, sea-level pressure (purple, last three "
+                "digits in tenths of hPa, so 132 is 1013.2), sky cover in the circle, wind barbs in knots, and gusts "
+                "(G, orange) where they reach 15 kt. Hover a plot for details; zoom in for more stations.")
+
+
+def surface_legend():
+    leg = legend("Precipitation rate (in/h) by type", RATE_LEVELS, binned(RATE_LEVELS, PTYPES[0][2])[0],
+                 lines="White lines: sea-level pressure, every 4 hPa")
+    leg["ramps"] = [[name, colors] for _, name, colors in PTYPES]
+    leg["under"] = legend("Cloud cover (%)", SKY_LEVELS, SKY[0])
+    leg["stations"] = True
+    return leg
+
+
 # ---------------------------------------------------------------- models
 
 MODELS = {
@@ -526,6 +684,7 @@ MODELS = {
         "name": "GFS", "long": "GFS 0.25°", "source": "NOAA Global Forecast System via AWS Open Data",
         "url": gfs_url, "hours": list(range(6, 169, 6)), "fields": gfs_fields, "decode": {"subset": GFS_SUBSET},
         "products": [
+            ("surface", "Surface map", surface(gfs_surface_prep), surface_legend(), SURFACE_NOTE),
             ("precip_mslp", "Precip & pressure", gfs_precip,
              legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
             ("vort700", "700 mb vorticity", gfs_vort700,
@@ -561,6 +720,7 @@ MODELS = {
         "name": "HRRR", "long": "HRRR 3 km", "source": "NOAA High-Resolution Rapid Refresh via AWS Open Data",
         "url": hrrr_url, "hours": list(range(1, 49)), "fields": hrrr_fields, "decode": {"step": 2},
         "products": [
+            ("surface", "Surface map", surface(hrrr_surface_prep), surface_legend(), SURFACE_NOTE),
             ("refc", "Simulated radar", simple("refc", REFL), legend("Composite reflectivity (dBZ)", REFL_LEVELS, REFL[0])),
             ("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
             ("precip", "1-hour precip", simple("apcp", PRECIP, lambda v: v / 25.4), legend("1-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
@@ -581,6 +741,7 @@ MODELS = {
         "url": ecmwf_url, "hours": list(range(6, 169, 6)), "fields": ecmwf_fields, "decode": {"subset": ECMWF_SUBSET},
         "get": ecmwf_get, "every": 12, "index_suffix": ".index",
         "products": [
+            ("surface", "Surface map", surface(ecmwf_surface_prep), surface_legend(), SURFACE_NOTE),
             ("precip_mslp", "Precip & pressure", gfs_precip,
              legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
             ("vort700", "700 mb vorticity", gfs_vort700,

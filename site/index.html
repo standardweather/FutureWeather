@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FutureWeather | Standard Weather</title>
-  <meta name="description" content="FutureWeather — GFS, National Blend of Models and HRRR forecast maps, plus the National Weather Service forecast for any U.S. location." />
+  <meta name="description" content="FutureWeather — GFS, ECMWF, National Blend of Models and HRRR forecast maps, surface maps with forecast station plots, plus the National Weather Service forecast for any U.S. location." />
   <meta name="theme-color" content="#070914" />
   <link rel="canonical" href="https://standardweather.github.io/FutureWeather/" />
   <meta property="og:type" content="website" />
@@ -73,6 +73,15 @@
     .strip i.ok { background: #3fcf9a; } .strip i.no { background: rgba(255, 107, 90, 0.75); } .strip i.dark { background: rgba(255, 255, 255, 0.12); }
     .strip__ticks { display: flex !important; justify-content: space-between; font: 0.64rem var(--mono); color: var(--text3); }
     .strip__ticks b { font-weight: 400; width: 25%; }
+    /* Surface map: precipitation ramps by type, and the station plots. */
+    .ramp { display: grid; grid-template-columns: 5.6rem 1fr; align-items: center; gap: 0.4rem; font-size: 0.68rem; color: var(--text2); }
+    .ramp .bins { margin-top: 0.25rem; }
+    .ramp .ticks { position: relative; height: 0.9rem; font: 0.68rem var(--mono); color: var(--text3); margin: 0.15rem 0.5rem 0; }
+    .ramp .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+    .maplegend .stnkey b { font-weight: 600; }
+    @media (max-width: 700px) { .maplegend.surface .lines, .maplegend.surface .bins + .ticks { display: none; } }
+    .leaflet-marker-icon.stn, .stn svg { pointer-events: none; }
+    .stn svg circle, .stn svg text { pointer-events: visiblePainted; cursor: pointer; }
     .scrub .when small { display: block; color: var(--text3); font: 0.7rem var(--mono); }
   </style>
 </head>
@@ -116,6 +125,8 @@
       <details class="layers" id="layerBox">
         <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 13 10 5 10-5"/></svg> Layers</summary>
         <div class="layers__body">
+          <div id="stnToggle" hidden><h4>Model map</h4>
+          <div class="checks"><label><input type="checkbox" id="stnOn" checked /> Station plots</label></div></div>
           <h4>Outlooks</h4>
           <div class="checks" id="overlays">
             <label><input type="checkbox" data-wpc="qpf" /> Rain, 7 days</label>
@@ -148,6 +159,6 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/js/workwindows.js?v=1"></script>
   <script src="/js/geocode.js?v=1"></script>
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>
