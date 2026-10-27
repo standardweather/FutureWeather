@@ -1,6 +1,7 @@
 /* FutureWeather — model forecast console for standardweather.github.io.
  *
- *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions)
+ *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions),
+ *                 and the Surface map's forecast station plots (stations.json plus a values file per hour)
  *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram and work windows (api.weather.gov)
  *   GEFS          NOAA's 31-member ensemble at the point, for forecast confidence (tiles packed by make_ensemble.py)
  *   WPC, SPC, CPC 7-day rainfall, excessive rainfall, day 1–8 severe and 6–14 day outlooks (NOAA map services, drawn live)
@@ -26,7 +27,7 @@
     view: ["windows", "confidence"].includes(params.get("view")) ? params.get("view") : params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
     work: null,
     point: null, pointError: null, openPeriod: null, query: "",
-    compare: params.get("compare") === "1", wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
+    compare: params.get("compare") === "1", stations: params.get("stations") !== "0", wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
   };
 
   // —— Map ————————————————————————————————————————————————————————
@@ -34,7 +35,7 @@
   map.fitBounds([[24, -125], [50, -66]], { animate: false });
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["model", 350], ["points", 620], ["labels", 640]].forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
+  [["model", 350], ["points", 620], ["labels", 640], ["stations", 645]].forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
   map.getPane("model").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
@@ -66,6 +67,7 @@
     img.onerror = () => { if (want === url) setStatus("This map isn't available."); };
     img.src = url;
     drawCompare();
+    drawStations();
   }
 
   // —— Compare: GFS and ECMWF side by side, at the same valid time ————————————————
@@ -90,7 +92,10 @@
       map2 = L.map("map2", { zoomControl: false, attributionControl: false, minZoom: 3, maxZoom: 10, zoomSnap: 0.5 });
       map2.createPane("model").style.zIndex = 350;
       map2.createPane("labels").style.zIndex = 640;
+      map2.createPane("stations").style.zIndex = 645;
       map2.getPane("labels").style.pointerEvents = "none";
+      stationLayer2.addTo(map2);
+      map2.on("moveend", () => { const o = partner(); if (o) plotStations(map2, stationLayer2, o, nearestHour(o, validAt(model(), model().hours[state.hour]))); });
       L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16 }).addTo(map2);
       L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, pane: "labels", opacity: 0.85 }).addTo(map2);
       const follow = (from, to) => from.on("move", () => { if (syncing) return; syncing = true; to.setView(from.getCenter(), from.getZoom(), { animate: false }); syncing = false; });
@@ -103,6 +108,7 @@
     const url = imgUrl(other, product().id, h2);
     if (!overlay2) overlay2 = L.imageOverlay(url, state.info.bounds, { pane: "model", opacity: 0.78, interactive: false }).addTo(map2);
     else overlay2.setUrl(url);
+    plotStations(map2, stationLayer2, other, h2);
     const tag = (x, h) => `${x.name} ${pad(new Date(x.init).getUTCHours())}Z · F${pad(h, 3)}`;
     $("tag1").textContent = tag(m, m.hours[state.hour]);
     $("tag2").textContent = tag(other, h2) + (validAt(other, h2) !== t ? " (nearest)" : "");
@@ -180,23 +186,126 @@
   function preload() {
     const m = model(), p = product();
     m.hours.forEach((h) => { new Image().src = imgUrl(m, p.id, h); });
+    if (p.legend?.stations && state.stations) m.hours.forEach((h) => loadStations(m, h));
   }
+
+  // —— Station plots (Surface map) —————————————————————————————————————————
+  // stations.json lists [label, lat, lon, priority] with the biggest airports first; each hour's file has one row per
+  // station: [temp °F, dew point °F, pressure (tenths of hPa), sky %, wind from °, wind kt, gust kt, type, rate (0.01 in/h)].
+  const PTYPE = ["", "rain", "snow", "ice pellets", "freezing rain"];
+  const SPACING = 74;   // px between plots; zooming in reveals smaller airports
+  const stationLayer = L.layerGroup().addTo(map), stationLayer2 = L.layerGroup();
+  let stationList = null;
+  const stationRows = {};
+  const stationUrl = (m, fhr) => `img/${m.id}/surface_f${pad(fhr, 3)}.json?run=${encodeURIComponent(m.cycle)}`;
+  function loadStations(m, fhr) {
+    stationList ||= fetch("stations.json").then((r) => r.json()).catch(() => []);
+    const url = stationUrl(m, fhr);
+    stationRows[url] ||= fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    return Promise.all([stationList, stationRows[url]]);
+  }
+
+  // Wind barb drawn from the station toward where the wind comes from: pennant 50 kt, full barb 10, half barb 5.
+  // Larger than usual, with a dark edge, so it reads over clouds and precipitation.
+  function barbPath(spd) {
+    let n = Math.round(spd / 5) * 5, y = -34, d = "M0 -7 V-34", flags = "";
+    if (n < 5) return { d: "", flags: "" };
+    while (n >= 50) { flags += `M0 ${y} L13 ${y + 3} L0 ${y + 6.5} Z`; y += 8; n -= 50; }
+    while (n >= 10) { d += `M0 ${y} L13 ${y - 5}`; y += 5; n -= 10; }
+    if (n >= 5) { if (y === -34) y += 5; d += `M0 ${y} L6.5 ${y - 2.5}`; }
+    return { d, flags };
+  }
+  // Sky cover in the station circle, as quarters: clear, few, scattered, broken, overcast.
+  function skyCircle(pct) {
+    const r = 6, q = pct < 6 ? 0 : pct <= 31 ? 1 : pct <= 56 ? 2 : pct <= 87 ? 3 : 4;
+    const ring = `<circle r="${r}" fill="#0b1022" stroke="#fff" stroke-width="1.6"/>`;
+    if (q === 0) return ring;
+    if (q === 4) return `<circle r="${r}" fill="#fff" stroke="#0b1022" stroke-width="1"/>`;
+    const a = (q / 4) * 2 * Math.PI, x = (r * Math.sin(a)).toFixed(2), y = (-r * Math.cos(a)).toFixed(2);
+    return `${ring}<path d="M0 0 V${-r} A${r} ${r} 0 ${q > 2 ? 1 : 0} 1 ${x} ${y} Z" fill="#fff"/>`;
+  }
+  function stationSvg(st, v) {
+    const [t, d, p, sky, dir, spd, gust] = v;
+    const b = barbPath(spd), calm = spd < 3;
+    const text = (x, y, anchor, color, s, size = 12.5) => `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${color}" font-size="${size}">${s}</text>`;
+    return `<svg width="120" height="96" viewBox="-60 -48 120 96" style="overflow:visible">
+      <g transform="rotate(${dir})" stroke-linecap="round">
+        ${b.d ? `<path d="${b.d}" stroke="#0b1022" stroke-width="4.4" fill="none"/><path d="${b.d}" stroke="#fff" stroke-width="2" fill="none"/>` : ""}
+        ${b.flags ? `<path d="${b.flags}" fill="#fff" stroke="#0b1022" stroke-width="1"/>` : ""}
+      </g>
+      ${calm ? `<circle r="9.5" fill="none" stroke="#fff" stroke-width="1.4"/>` : ""}${skyCircle(sky)}
+      <g font-family="IBM Plex Mono, monospace" font-weight="600" paint-order="stroke" stroke="#0b1022" stroke-width="3" stroke-linejoin="round">
+        ${text(-10, -5, "end", "#ff6b5a", t)}${text(-10, 16, "end", "#3fcf9a", d)}
+        ${text(10, -5, "start", "#c9a2ff", pad(p % 1000, 3))}${text(10, 6.5, "start", "#e8ebf5", esc(st[0]), 10.5)}
+        ${gust >= 15 ? text(10, 18.5, "start", "#ff9f43", `G${gust}`) : ""}
+      </g></svg>`;
+  }
+  function stationTip(st, v) {
+    const [t, d, p, sky, dir, spd, gust, type, rate] = v;
+    const wind = spd < 3 ? "calm" : `${pad(dir, 3)}° ${spd} kt${gust >= spd + 3 ? `, gusts ${gust} kt` : ""}`;
+    return `${st[0]} · ${t}°F, dew point ${d}°F · wind ${wind} · ${(p / 10).toFixed(1)} hPa · cloud ${sky}%${type && rate ? ` · ${PTYPE[type]} ${(rate / 100).toFixed(2)} in/h` : ""}`;
+  }
+  // Plots are thinned to one per SPACING px, keeping the biggest airports.
+  async function plotStations(target, layer, m, fhr) {
+    const key = `${m.id}/${fhr}/${product().id}`;
+    layer._want = key;
+    const on = state.stations && product().legend?.stations;
+    if (!on) { layer.clearLayers(); return; }
+    const [list, rows] = await loadStations(m, fhr);
+    if (layer._want !== key) return;
+    layer.clearLayers();
+    if (!rows) return;
+    const size = target.getSize(), taken = new Map();
+    const cell = (x, y) => `${Math.floor(x / SPACING)},${Math.floor(y / SPACING)}`;
+    list.forEach((st, i) => {
+      const v = rows[i];
+      if (!v) return;
+      const pt = target.latLngToContainerPoint([st[1], st[2]]);
+      if (pt.x < -40 || pt.y < -40 || pt.x > size.x + 40 || pt.y > size.y + 40) return;
+      const cx = Math.floor(pt.x / SPACING), cy = Math.floor(pt.y / SPACING);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+        for (const q of taken.get(`${cx + dx},${cy + dy}`) || []) if (Math.abs(q.x - pt.x) < SPACING && Math.abs(q.y - pt.y) < SPACING * 0.8) return;
+      }
+      const k = cell(pt.x, pt.y);
+      taken.set(k, [...(taken.get(k) || []), pt]);
+      L.marker([st[1], st[2]], { pane: "stations", keyboard: false, icon: L.divIcon({ className: "stn", iconSize: [120, 96], iconAnchor: [60, 48], html: stationSvg(st, v) }) })
+        .bindTooltip(stationTip(st, v), { className: "tw-tip", direction: "top", offset: [0, -10] })
+        .on("click", () => map.fire("click", { latlng: L.latLng(st[1], st[2]) }))
+        .addTo(layer);
+    });
+  }
+  function drawStations() {
+    $("stnToggle").hidden = !product().legend?.stations;
+    plotStations(map, stationLayer, model(), model().hours[state.hour]);
+  }
+  map.on("moveend", () => { if (state.info) drawStations(); });
+  $("stnOn").checked = state.stations;
+  $("stnOn").addEventListener("change", (e) => { state.stations = e.target.checked; drawStations(); drawCompare(); syncUrl(); });
 
   // —— Legend ———————————————————————————————————————————————————————
   const Legend = L.Control.extend({ options: { position: "topleft" }, onAdd() { const d = L.DomUtil.create("div", "maplegend"); d.id = "legend"; return d; } });
   new Legend().addTo(map);
+  const bins = (colors) => `<div class="bins">${colors.map((c) => `<i style="background:${c}"></i>`).join("")}</div>`;
+  function ticks(lg) {
+    const n = lg.levels.length - 1;
+    // Label every edge when there's room, otherwise every second or third.
+    const wide = lg.levels.some((v) => String(v).length >= 4);
+    const every = n > 18 ? 6 : n > 10 || (wide && n > 6) || (lg.ramps && n > 5) ? 2 : 1;
+    return `<div class="ticks">${lg.levels.map((v, i) => (i % every === 0 ? `<span style="left:${(i / n) * 100}%">${lg.ramps ? String(v).replace(/^0\./, ".") : v}</span>` : "")).join("")}</div>`;
+  }
   function drawLegend() {
     const lg = product().legend;
     if (!lg) { $("legend").innerHTML = ""; return; }
-    const n = lg.colors.length;
-    // Label every edge when there's room, otherwise every second or third.
-    const wide = lg.levels.some((v) => String(v).length >= 4);
-    const every = n > 18 ? 6 : n > 10 || (wide && n > 6) ? 2 : 1;
-    const ticks = lg.levels.map((v, i) => (i % every === 0 ? `<span style="left:${(i / n) * 100}%">${v}</span>` : "")).join("");
-    $("legend").innerHTML = `<h5 class="sub">${esc(lg.label)}</h5>
-      <div class="bins">${lg.colors.map((c) => `<i style="background:${c}"></i>`).join("")}</div><div class="ticks">${ticks}</div>
+    // The Surface map has one ramp per precipitation type on a shared scale, then cloud cover.
+    const scale = lg.ramps
+      ? `${lg.ramps.map(([name, colors]) => `<div class="ramp"><span>${esc(name)}</span>${bins(colors)}</div>`).join("")}<div class="ramp"><span></span>${ticks(lg)}</div>`
+      : bins(lg.colors) + ticks(lg);
+    $("legend").classList.toggle("surface", !!lg.ramps);
+    $("legend").innerHTML = `<h5 class="sub">${esc(lg.label)}</h5>${scale}
+      ${lg.under ? `<h5 class="sub">${esc(lg.under.label)}</h5>${bins(lg.under.colors)}${ticks(lg.under)}` : ""}
       ${lg.extra ? `<div class="key">${lg.extra.map(([c, l]) => `<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>` : ""}
-      ${lg.lines ? `<p class="lines">${esc(lg.lines)}</p>` : ""}`;
+      ${lg.lines ? `<p class="lines">${esc(lg.lines)}</p>` : ""}
+      ${lg.stations ? `<p class="lines stnkey">Stations: <b style="color:#ff6b5a">temp</b> <b style="color:#3fcf9a">dew pt</b> °F · <b style="color:#c9a2ff">pressure</b> · <b style="color:#ff9f43">G gust</b> · barbs in kt</p>` : ""}`;
   }
 
   // —— Time controls ————————————————————————————————————————————————
@@ -260,6 +369,7 @@
       if (state.work.day !== base.day) q.set("day", state.work.day ? "1" : "0");
     }
     if (state.compare) q.set("compare", "1");
+    if (!state.stations) q.set("stations", "0");
     history.replaceState(null, "", `?${q}`);
   }
 
