@@ -300,9 +300,11 @@
     const scale = lg.ramps
       ? `${lg.ramps.map(([name, colors]) => `<div class="ramp"><span>${esc(name)}</span>${bins(colors)}</div>`).join("")}<div class="ramp"><span></span>${ticks(lg)}</div>`
       : bins(lg.colors) + ticks(lg);
-    $("legend").classList.toggle("surface", !!lg.ramps);
+    // The Surface and Upper air maps have tall legends; on phones they drop the tick labels and notes.
+    $("legend").classList.toggle("surface", !!(lg.ramps || lg.more));
     $("legend").innerHTML = `<h5 class="sub">${esc(lg.label)}</h5>${scale}
       ${lg.under ? `<h5 class="sub">${esc(lg.under.label)}</h5>${bins(lg.under.colors)}${ticks(lg.under)}` : ""}
+      ${(lg.more || []).map((x) => `<h5 class="sub">${esc(x.label)}</h5>${bins(x.colors)}${ticks(x)}`).join("")}
       ${lg.extra ? `<div class="key">${lg.extra.map(([c, l]) => `<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>` : ""}
       ${lg.lines ? `<p class="lines">${esc(lg.lines)}</p>` : ""}
       ${lg.stations ? `<p class="lines stnkey">Stations: <b style="color:#ff6b5a">temp</b> <b style="color:#3fcf9a">dew pt</b> °F · <b style="color:#c9a2ff">pressure</b> · <b style="color:#ff9f43">G gust</b> · barbs in kt</p>` : ""}`;

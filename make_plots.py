@@ -17,6 +17,8 @@ Output, per model:
 Overlays are drawn in Web Mercator over BOUNDS, so the page lays them straight onto its Leaflet map.
 merge_runs.py combines the per-model files into site/data.json.
 
+The Upper air map's normalized 500 mb height anomaly uses z500_climate.npz, built once by make_climatology.py.
+
 FW_HOURS=2 limits each model to its first two forecast hours (for local testing).
 """
 
@@ -329,6 +331,10 @@ def gfs_fields(fhr):
     }
     for var in ("CRAIN", "CSNOW", "CICEP", "CFRZR"):
         wanted[var.lower()] = f"{var}:surface:{fhr} hour fcst"
+    wanted["pwat"] = "PWAT:entire atmosphere"
+    wanted["z500"] = "HGT:500 mb:"
+    for lev in (850, 500):
+        wanted[f"u{lev}"], wanted[f"v{lev}"] = f"UGRD:{lev} mb:", f"VGRD:{lev} mb:"
     for lev in {700, 200} | {lev for pair in TURB_LAYERS for lev in pair}:
         for var, key in (("HGT", "z"), ("UGRD", "u"), ("VGRD", "v")):
             wanted[f"{key}{lev}"] = f"{var}:{lev} mb:"
@@ -519,10 +525,12 @@ def ecmwf_fields(fhr):
     total needs the previous step's file too ("tp_prev")."""
     wanted = {"mslp": ("msl", None), "tp": ("tp", None), "t2m": ("2t", None), "d2m": ("2d", None),
               "u10": ("10u", None), "v10": ("10v", None), "gust": [("10fg", None), ("10fg3", None)], "tcc": ("tcc", None),
-              "ptype": ("ptype", None), "tprate": ("tprate", None)}
-    for lev in (700, 200):
+              "ptype": ("ptype", None), "tprate": ("tprate", None), "pwat": ("tcwv", None)}
+    for lev in (700, 500, 200):
         for var, key in (("gh", "z"), ("u", "u"), ("v", "v")):
             wanted[f"{key}{lev}"] = (var, str(lev))
+    for lev in (850, 250):
+        wanted[f"u{lev}"], wanted[f"v{lev}"] = ("u", str(lev)), ("v", str(lev))
     return wanted
 
 
@@ -679,6 +687,130 @@ def surface_legend():
     return leg
 
 
+# ---------------------------------------------------------------- Upper air map
+# A composite of the main ingredients: precipitable water, the 250 mb jet and smoothed 500 mb vorticity in
+# color, with 500 mb heights (red or blue where they sit 2 standard deviations above or below normal for the
+# date), 850 mb wind arrows and sea-level pressure with its highs and lows. Each model supplies the common
+# fields pwat (kg/m² = mm), u/v250, z500, u/v500, u/v850 (m/s, earth-relative) and mslp (Pa).
+
+PWAT_LEVELS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75]   # in
+PWAT = ramp(PWAT_LEVELS, [(0.75, "#24452e"), (1.5, "#3d8a4f"), (2.25, "#5fc46a"), (2.75, "#b4f0a0")])
+JET250_LEVELS = list(range(80, 221, 20))   # kt
+JET250 = binned(JET250_LEVELS, ["#9fd6f5", "#5fb0ef", "#2f6fe0", "#7f6cf0", "#a34ae8", "#d040e0", "#f0b0ec"])
+VORT500_LEVELS = [4, 8, 12, 16, 20, 24, 28]   # 10⁻⁵ s⁻¹, cyclonic only
+VORT500 = ramp(VORT500_LEVELS, [(4, "#f6e33c"), (12, "#f5a33a"), (20, "#e8603a"), (28, "#c8326e")])
+ANOM_HIGH, ANOM_LOW = "#ff5a4f", "#4aa8ff"   # heights at least 2σ above / below normal
+
+CLIMATE = np.load(Path(__file__).parent / "z500_climate.npz") if (Path(__file__).parent / "z500_climate.npz").exists() else None
+
+
+def z500_anomaly(z, valid):
+    """Normalized 500 mb height anomaly (standard deviations from the 1991–2020 normal for the date), from
+    the harmonic fits in z500_climate.npz (see make_climatology.py), interpolated to the model grid."""
+    from scipy.interpolate import RegularGridInterpolator
+    from make_climatology import design
+    X = design([valid.timetuple().tm_yday])[0]
+    lat, lon = CLIMATE["lat"][::-1], CLIMATE["lon"]   # the interpolator wants increasing axes
+    mean = np.tensordot(X, CLIMATE["mean"], 1)[::-1]
+    std = np.sqrt(np.maximum(np.tensordot(X, CLIMATE["var"], 1), 1))[::-1]
+    glon, glat = np.meshgrid((z.longitude.values + 180) % 360 - 180, z.latitude.values)
+    pts = np.column_stack([glat.ravel(), glon.ravel()])
+    at = lambda a: RegularGridInterpolator((lat, lon), a, bounds_error=False, fill_value=np.nan)(pts).reshape(glat.shape)
+    return (z.values - at(mean)) / at(std)
+
+
+def anomaly_lines(ax, cs, x, y, anom):
+    """Redraw the parts of each height contour where the anomaly reaches ±2σ, in red or blue."""
+    from scipy.interpolate import RegularGridInterpolator
+    from matplotlib.collections import LineCollection
+    # Interpolate on the grid's own (x, y): rows and columns of a regular lat/lon grid stay straight in Mercator.
+    interp = RegularGridInterpolator((y[::-1, 0], x[0]), np.nan_to_num(anom)[::-1], bounds_error=False, fill_value=0)
+    for limit, color in ((2, ANOM_HIGH), (-2, ANOM_LOW)):
+        runs = []
+        for seg in (s for level in cs.allsegs for s in level if len(s) > 1):
+            hit = interp(seg[:, ::-1]) * np.sign(limit) >= abs(limit)
+            # Consecutive vertices in the anomaly area form one run; each run is a separate line.
+            edges = np.flatnonzero(np.diff(np.r_[0, hit.astype(int), 0]))
+            runs += [seg[a:b] for a, b in zip(edges[::2], edges[1::2]) if b - a > 1]
+        if runs:
+            ax.add_collection(LineCollection(runs, colors=color, linewidths=2.6, zorder=5.5, capstyle="round",
+                                             path_effects=[pe.withStroke(linewidth=4.2, foreground="#0b1022")]))
+
+
+def highs_and_lows(ax, x, y, mslp, size=60):
+    """H and L with the central pressure at the highest and lowest point within about 15° (size grid points)."""
+    from scipy.ndimage import maximum_filter, minimum_filter
+    halo = [pe.withStroke(linewidth=3, foreground="#0b1022")]
+    rows, cols = mslp.shape
+    edge = 6   # skip extremes on the grid's edge; they are usually just the edge of a larger system
+    for filt, letter, color in ((maximum_filter, "H", ANOM_LOW), (minimum_filter, "L", ANOM_HIGH)):
+        extreme = filt(mslp, size=size, mode="nearest") == mslp
+        for i, j in zip(*np.nonzero(extreme)):
+            if edge <= i < rows - edge and edge <= j < cols - edge and X0 < x[i, j] < X1 and Y0 < y[i, j] < Y1:
+                if letter == "H" and mslp[i, j] < 1012 or letter == "L" and mslp[i, j] > 1012:
+                    continue   # flat areas give weak "extremes"
+                ax.text(x[i, j], y[i, j], letter, color=color, fontsize=26, fontweight="bold", ha="center",
+                        va="center", zorder=7, path_effects=halo)
+                ax.text(x[i, j], y[i, j] - 0.016, f"{mslp[i, j]:.0f}", color=color, fontsize=13, fontweight="bold",
+                        ha="center", va="top", zorder=7, path_effects=halo)
+
+
+def upper_air(f, path):
+    x, y = lonlat(f["z500"])
+    fig, ax = new_overlay()
+    shade(ax, x, y, f["pwat"].values / 25.4, PWAT, alpha=0.8)   # mm -> in
+    jet = gaussian_filter(np.hypot(f["u250"].values, f["v250"].values) * 1.94384, sigma=1)
+    shade(ax, x, y, np.minimum(jet, JET250_LEVELS[-1] - 0.01), JET250, alpha=0.85)
+    vort = mpcalc.vorticity(f["u500"].metpy.quantify(), f["v500"].metpy.quantify())
+    vort = gaussian_filter(vort.metpy.dequantify().values * 1e5, sigma=4)
+    shade(ax, x, y, np.minimum(vort, VORT500_LEVELS[-1] - 0.01), VORT500, alpha=0.8)
+
+    # Sea-level pressure: thin gray isobars under everything else.
+    mslp = gaussian_filter(f["mslp"].values / 100, sigma=3)
+    cs = ax.contour(x, y, mslp, levels=np.arange(940, 1061, 4), colors="#a3abbd", linewidths=0.6, zorder=3)
+    ax.clabel(cs, fmt="%d", fontsize=7, inline=True, inline_spacing=2)
+
+    # 850 mb wind: equal-length arrows for direction, where it blows 20 kt or more (low-level jets, warm
+    # and cold advection).
+    u, v = f["u850"].values, f["v850"].values
+    spd = np.hypot(u, v)
+    s = (slice(4, None, 8), slice(4, None, 8))
+    keep = spd[s] * 1.94384 >= 20
+    ax.quiver(x[s][keep], y[s][keep], (u / np.maximum(spd, 0.1))[s][keep], (v / np.maximum(spd, 0.1))[s][keep],
+              color="#d6dcea", alpha=0.85, scale=90, width=0.0013, headwidth=4, headlength=4, headaxislength=3.6,
+              pivot="middle", zorder=6)
+
+    # 500 mb heights every 6 dam, white with a dark edge, then red or blue where they are unusually high or low.
+    halo = [pe.withStroke(linewidth=3.2, foreground="#0b1022")]
+    z = gaussian_filter(f["z500"].values / 10, sigma=2)
+    cs = ax.contour(x, y, z, levels=np.arange(456, 613, 6), colors="#ffffff", linewidths=1.5, zorder=5)
+    cs.set(path_effects=halo)
+    for t in ax.clabel(cs, fmt="%d", fontsize=11, inline=True, inline_spacing=3):
+        t.set_fontweight("bold")
+        t.set_path_effects(halo)
+    if CLIMATE is not None:   # after the labels, so the colored runs break around them too
+        anomaly_lines(ax, cs, x, y, gaussian_filter(z500_anomaly(f["z500"], f["valid"]), sigma=2))
+
+    highs_and_lows(ax, x, y, mslp)
+    save(fig, path)
+
+
+def upper_air_legend():
+    leg = legend("Precipitable water (in)", PWAT_LEVELS, PWAT[0],
+                 lines="White lines: 500 mb heights (dam) · gray lines: sea-level pressure (hPa) · arrows: 850 mb wind of 20 kt or more")
+    leg["more"] = [legend("250 mb wind (kt)", JET250_LEVELS, JET250[0]),
+                   legend("500 mb vorticity (10⁻⁵ s⁻¹, smoothed)", VORT500_LEVELS, VORT500[0])]
+    leg["extra"] = [[ANOM_HIGH, "Heights 2σ+ above normal"], [ANOM_LOW, "2σ+ below normal"]]
+    return leg
+
+
+UPPER_AIR_NOTE = ("Green is precipitable water, the moisture in the whole column; blue to pink is the 250 mb jet stream; "
+                  "yellow to red is spin at 500 mb, which marks troughs and shortwaves that lift the air. "
+                  "500 mb height lines turn red or blue where heights are at least two standard deviations above or "
+                  "below the 1991–2020 normal for the date (NCEP/NCAR Reanalysis). Arrows show 850 mb wind direction "
+                  "where it reaches 20 kt; H and L mark sea-level highs and lows with their central pressure.")
+
+
 # ---------------------------------------------------------------- models
 
 MODELS = {
@@ -687,6 +819,7 @@ MODELS = {
         "url": gfs_url, "hours": list(range(6, 169, 6)), "fields": gfs_fields, "decode": {"subset": GFS_SUBSET},
         "products": [
             ("surface", "Surface map", surface(gfs_surface_prep), surface_legend(), SURFACE_NOTE),
+            ("upper", "Upper air map", upper_air, upper_air_legend(), UPPER_AIR_NOTE),
             ("precip_mslp", "Precip & pressure", gfs_precip,
              legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
             ("vort700", "700 mb vorticity", gfs_vort700,
@@ -744,6 +877,7 @@ MODELS = {
         "get": ecmwf_get, "every": 12, "index_suffix": ".index",
         "products": [
             ("surface", "Surface map", surface(ecmwf_surface_prep), surface_legend(), SURFACE_NOTE),
+            ("upper", "Upper air map", upper_air, upper_air_legend(), UPPER_AIR_NOTE),
             ("precip_mslp", "Precip & pressure", gfs_precip,
              legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
             ("vort700", "700 mb vorticity", gfs_vort700,
@@ -773,6 +907,7 @@ def run(model_id):
         except Exception as e:   # one bad hour shouldn't sink the run
             print(f"  F{fhr:03d} skipped: {e}")
             continue
+        fields["valid"] = cycle + timedelta(hours=fhr)
         for pid, _, draw, *_ in m["products"]:
             draw(fields, img / f"{pid}_f{fhr:03d}.png")
         done.append(fhr)
