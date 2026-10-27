@@ -518,7 +518,7 @@ def ecmwf_fields(fhr):
     """(param, level) pairs. Precipitation is accumulated from the start of the run, so the 6-hour
     total needs the previous step's file too ("tp_prev")."""
     wanted = {"mslp": ("msl", None), "tp": ("tp", None), "t2m": ("2t", None), "d2m": ("2d", None),
-              "u10": ("10u", None), "v10": ("10v", None), "gust": ("10fg", None), "tcc": ("tcc", None),
+              "u10": ("10u", None), "v10": ("10v", None), "gust": [("10fg", None), ("10fg3", None)], "tcc": ("tcc", None),
               "ptype": ("ptype", None), "tprate": ("tprate", None)}
     for lev in (700, 200):
         for var, key in (("gh", "z"), ("u", "u"), ("v", "v")):
@@ -537,6 +537,8 @@ def ecmwf_get(url, wanted, subset=None):
         return get_retry(u, headers={"Range": f"bytes={off}-{off + length - 1}"}).content
 
     idx = index(url)
+    # A list gives alternatives: the gust is the last hour's (10fg) or, on 3-hourly steps, the last 3 hours' (10fg3).
+    wanted = {name: next((k for k in key if k in idx), key[0]) if isinstance(key, list) else key for name, key in wanted.items()}
     with ThreadPoolExecutor(max_workers=3) as pool:   # the bucket rate-limits more than a few at once
         blobs = dict(zip(wanted, pool.map(lambda key: fetch(url, idx, key), wanted.values())))
     f = {name: decode(blob, subset=subset) for name, blob in blobs.items()}
