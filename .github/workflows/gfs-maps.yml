@@ -62,8 +62,31 @@ jobs:
           path: site/ens
           retention-days: 1
 
+  # Data for AIRMETcast (the experimental, unlisted page at /AviationWeather/airmetcast/): AIRMET- and
+  # convective SIGMET-style areas worked out from raw GFS and HRRR output by make_airmetcast.py.
+  airmetcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [gfs, hrrr]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python make_airmetcast.py ${{ matrix.model }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airmetcast-${{ matrix.model }}
+          path: site/airmetcast/data
+          retention-days: 1
+
   deploy:
-    needs: [build, ensemble]
+    needs: [build, ensemble, airmetcast]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment:
@@ -82,6 +105,13 @@ jobs:
         with:
           name: ensemble
           path: site/ens
+      # A failed AIRMETcast job leaves that page saying nothing has been made yet.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: airmetcast-*
+          path: site/airmetcast/data
+          merge-multiple: true
       - run: python3 merge_runs.py
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
