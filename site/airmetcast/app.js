@@ -1,8 +1,10 @@
-/* Hazard Outlook — experimental, unlisted page. AIRMET- and convective SIGMET-style areas that make_outlook.py works out
+/* AIRMETcast — experimental, unlisted page. AIRMET- and convective SIGMET-style areas that make_airmetcast.py works out
  * from raw GFS and HRRR output, drawn per forecast hour, with an altitude filter and the official G-AIRMETs for comparison.
  *
- *   data/<model>.json, data/<model>/f<hhh>.geojson   make_outlook.py (GitHub Actions)
+ *   data/<model>.json, data/<model>/f<hhh>.geojson   make_airmetcast.py (GitHub Actions)
  *   NOAA map services (AWC layer 110)                  official G-AIRMET snapshots, for the Compare option
+ *   artcc.json                                         ARTCC (center) boundaries, FAA Aeronautical Information Services
+ *                                                      Boundary_Airspace layer, simplified to about 2 km
  */
 (() => {
   "use strict";
@@ -54,6 +56,7 @@
   const renderer = L.svg({ padding: 0.5 }).addTo(map);
   const shapesLayer = L.layerGroup().addTo(map);
   const officialLayer = L.layerGroup().addTo(map);
+  const artccLayer = L.layerGroup().addTo(map);
 
   // Diagonal hatching in each hazard color, so the areas never pass for the official solid ones.
   (function hatches() {
@@ -83,7 +86,7 @@
     const got = await Promise.all(["gfs", "hrrr"].map((id) =>
       fetch(`data/${id}.json?t=${Math.floor(Date.now() / 600000)}`).then((r) => (r.ok ? r.json() : null)).catch(() => null)));
     state.models = got.filter(Boolean);
-    if (!state.models.length) { setStatus("No outlook has been made yet."); return; }
+    if (!state.models.length) { setStatus("No AIRMETcast has been made yet."); return; }
     const want = state.models.findIndex((m) => m.id === params.get("model"));
     state.model = want >= 0 ? want : 0;
     buildModels();
@@ -129,6 +132,21 @@
   });
   $("labels").addEventListener("change", (e) => { state.labels = e.target.checked; draw(); });
   map.on("zoomend", () => { if (state.fc) draw(); });
+
+  // ARTCC boundaries: thin gray lines under the hazard areas, each center's identifier at its middle.
+  let artcc = null;
+  $("artcc").addEventListener("change", async (e) => {
+    artccLayer.clearLayers();
+    if (!e.target.checked) return;
+    artcc ||= fetch("artcc.json").then((r) => r.json()).catch(() => null);
+    const gj = await artcc;
+    if (!gj || !$("artcc").checked) return;
+    L.geoJSON(gj, { renderer, interactive: false, style: { color: "#c9d2f0", weight: 1, opacity: 0.55, fill: false } }).addTo(artccLayer);
+    gj.features.forEach((f) => {
+      const c = L.geoJSON(f).getBounds().getCenter();
+      artccLayer.addLayer(L.tooltip({ permanent: true, direction: "center", className: "artcc-label", pane: "labels" }).setLatLng(c).setContent(esc(f.properties.id)));
+    });
+  });
   $("official").addEventListener("change", (e) => { state.showOfficial = e.target.checked; drawOfficial(); });
 
   function setModel(i, hourIndex) {

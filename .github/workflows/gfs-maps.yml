@@ -62,9 +62,9 @@ jobs:
           path: site/ens
           retention-days: 1
 
-  # Experimental hazard outlook (unlisted page at /FutureWeather/aviation-outlook/): AIRMET- and convective
-  # SIGMET-style areas worked out from raw GFS and HRRR output by make_outlook.py.
-  outlook:
+  # AIRMETcast, an experimental unlisted page at /FutureWeather/airmetcast/): AIRMET- and convective
+  # SIGMET-style areas worked out from raw GFS and HRRR output by make_airmetcast.py.
+  airmetcast:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -78,15 +78,15 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python make_outlook.py ${{ matrix.model }}
+      - run: python make_airmetcast.py ${{ matrix.model }}
       - uses: actions/upload-artifact@v4
         with:
-          name: outlook-${{ matrix.model }}
-          path: site/aviation-outlook/data
+          name: airmetcast-${{ matrix.model }}
+          path: site/airmetcast/data
           retention-days: 1
 
   deploy:
-    needs: [build, ensemble, outlook]
+    needs: [build, ensemble, airmetcast]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment:
@@ -105,12 +105,12 @@ jobs:
         with:
           name: ensemble
           path: site/ens
-      # A failed outlook job leaves the unlisted outlook page saying nothing has been made yet.
+      # A failed AIRMETcast job leaves its unlisted page saying nothing has been made yet.
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: outlook-*
-          path: site/aviation-outlook/data
+          pattern: airmetcast-*
+          path: site/airmetcast/data
           merge-multiple: true
       - run: python3 merge_runs.py
       - uses: actions/configure-pages@v5

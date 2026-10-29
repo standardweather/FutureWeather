@@ -1,15 +1,15 @@
-"""Experimental AIRMET- and convective SIGMET-style hazard areas, worked out from raw model output.
+"""AIRMETcast: experimental AIRMET- and convective SIGMET-style hazard areas, worked out from raw model output.
 
 This is not an official product and is not linked from the rest of the site. It shares only the
 download helpers with make_plots.py; every hazard is computed again from the raw GRIB fields.
 
-    python make_outlook.py gfs         # Sierra, Tango and Zulu areas from the GFS column, F003–F048 every 3 h
-    python make_outlook.py hrrr        # IFR, mountain obscuration and convective areas from the HRRR, F01–F18
-    python make_outlook.py calibrate   # fit turb_climate.json from past GFS runs (run once, then commit it)
+    python make_airmetcast.py gfs         # Sierra, Tango and Zulu areas from the GFS column, F003–F048 every 3 h
+    python make_airmetcast.py hrrr        # IFR, mountain obscuration and convective areas from the HRRR, F01–F18
+    python make_airmetcast.py calibrate   # fit turb_climate.json from past GFS runs (run once, then commit it)
 
 Output, per model:
-  site/aviation-outlook/data/<model>/f<hhh>.geojson   hazard polygons, lines and points for one forecast hour
-  site/aviation-outlook/data/<model>.json             run info and the hours drawn
+  site/airmetcast/data/<model>/f<hhh>.geojson   hazard polygons, lines and points for one forecast hour
+  site/airmetcast/data/<model>.json             run info and the hours drawn
 
 How each hazard is found (thresholds are starting points, to be tuned against PIREPs and archived G-AIRMETs):
   IFR             ceiling below 1,000 ft AGL or visibility below 3 SM over at least half of a ~60 km box
@@ -45,7 +45,7 @@ from shapely.geometry import LineString, Polygon, mapping, shape
 
 from make_plots import byte_range, latest_cycle, read_index, session
 
-OUT = Path(__file__).parent / "site" / "aviation-outlook" / "data"
+OUT = Path(__file__).parent / "site" / "airmetcast" / "data"
 CLIMATE = Path(__file__).parent / "turb_climate.json"
 
 MIN_AREA_SQMI = 3000
@@ -918,5 +918,5 @@ def main(model_id):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in [*MODELS, "calibrate"]:
-        raise SystemExit(f"usage: make_outlook.py {{{','.join(MODELS)},calibrate}}")
+        raise SystemExit(f"usage: make_airmetcast.py {{{','.join(MODELS)},calibrate}}")
     calibrate() if sys.argv[1] == "calibrate" else main(sys.argv[1])

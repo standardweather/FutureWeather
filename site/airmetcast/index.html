@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Hazard Outlook (experimental) | Standard Weather</title>
+  <title>AIRMETcast (experimental) | Standard Weather</title>
   <!-- Unlisted test page: not linked from the site, kept out of search engines. -->
   <meta name="robots" content="noindex, nofollow" />
   <meta name="description" content="Experimental model-derived aviation hazard areas. Not an AIRMET or SIGMET and not for flight planning." />
@@ -47,6 +47,9 @@
     .hz-label { background: rgba(8, 10, 24, 0.82); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 5px; color: #fff; box-shadow: none;
       font: 500 0.68rem var(--mono); padding: 1px 5px; white-space: nowrap; }
     .hz-label::before { display: none; }
+    .artcc-label { background: none; border: 0; box-shadow: none; color: #c9d2f0; font: 600 0.72rem var(--mono); letter-spacing: 0.08em; opacity: 0.75;
+      text-shadow: 0 0 3px #000, 0 0 3px #000; }
+    .artcc-label::before { display: none; }
     .leaflet-popup-content { font-size: 0.82rem; }
     .pop h4 { margin: 0 0 0.3rem; font-size: 0.9rem; }
     .pop table { border-collapse: collapse; }
@@ -77,8 +80,8 @@
   </nav>
 
   <div class="app">
-    <aside class="side" aria-label="Hazard outlook">
-      <div class="side__head"><h1><span>Hazard</span>Outlook</h1><time id="run"></time></div>
+    <aside class="side" aria-label="AIRMETcast">
+      <div class="side__head"><h1><span>AIRMET</span>cast</h1><time id="run"></time></div>
       <div class="scroll" id="panel">
         <p class="exp"><b>Experimental.</b> These areas are worked out automatically from raw model output using AIRMET and convective SIGMET criteria. They are not AIRMETs, SIGMETs or any official product, and are not for flight planning. Use <a href="https://aviationweather.gov/" target="_blank" rel="noopener">aviationweather.gov</a> and an official briefing.</p>
         <div id="hazards"></div>
@@ -89,6 +92,7 @@
         </div>
         <div class="grp"><h4>Map</h4><div class="checks one">
           <label><input type="checkbox" id="official" /> Official G-AIRMETs at the same time <small id="offNote"></small></label>
+          <label><input type="checkbox" id="artcc" /> ARTCC boundaries</label>
           <label><input type="checkbox" id="labels" checked /> Labels</label>
         </div></div>
         <div class="areas" id="areas"></div>
