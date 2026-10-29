@@ -4,8 +4,8 @@ This is not an official product. The unlisted AIRMETcast page that draws it live
 (/AviationWeather/airmetcast/) and reads these files from /FutureWeather/airmetcast/data/. It shares only the
 download helpers with make_plots.py; every hazard is computed again from the raw GRIB fields.
 
-    python make_airmetcast.py gfs         # Sierra, Tango and Zulu areas from the GFS column, F003–F048 every 3 h
-    python make_airmetcast.py hrrr        # IFR, mountain obscuration and convective areas from the HRRR, F01–F18
+    python make_airmetcast.py gfs         # Sierra, Tango and Zulu areas from the GFS column, F003–F048 every 3 h, then to F168 every 6 h (as FutureWeather's maps)
+    python make_airmetcast.py hrrr        # IFR, mountain obscuration and convective areas from the HRRR, F01–F48 (its 00/06/12/18Z runs)
     python make_airmetcast.py calibrate   # fit turb_climate.json from past GFS runs (run once, then commit it)
 
 Output, per model:
@@ -865,7 +865,7 @@ def run_gfs(hours):
 
 
 def run_hrrr(hours):
-    # The newest hourly run that has reached its last hour.
+    # The newest run that has reached its last hour: an 00, 06, 12 or 18Z run when that is F48.
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     cycle = None
     for back in range(0, 8):
@@ -897,9 +897,9 @@ def run_hrrr(hours):
 
 
 MODELS = {
-    "gfs": {"name": "GFS", "long": "GFS 0.25°", "hours": list(range(3, 49, 3)), "run": run_gfs,
+    "gfs": {"name": "GFS", "long": "GFS 0.25°", "hours": list(range(3, 49, 3)) + list(range(54, 169, 6)), "run": run_gfs,
             "hazards": ["IFR", "MTN OBSCN", "TURB-HI", "TURB-LO", "SFC WND", "LLWS", "ICE", "M_FZLVL", "FZLVL"]},
-    "hrrr": {"name": "HRRR", "long": "HRRR 3 km", "hours": list(range(1, 19)), "run": run_hrrr,
+    "hrrr": {"name": "HRRR", "long": "HRRR 3 km", "hours": list(range(1, 49)), "run": run_hrrr,
              "hazards": ["IFR", "MTN OBSCN", "TS AREA", "TS LINE", "TS ISOL"]},
 }
 
