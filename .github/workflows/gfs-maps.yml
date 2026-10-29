@@ -62,8 +62,8 @@ jobs:
           path: site/ens
           retention-days: 1
 
-  # AIRMETcast, an experimental unlisted page at /FutureWeather/airmetcast/): AIRMET- and convective
-  # SIGMET-style areas worked out from raw GFS and HRRR output by make_airmetcast.py.
+  # Data for AIRMETcast (the experimental, unlisted page at /AviationWeather/airmetcast/): AIRMET- and
+  # convective SIGMET-style areas worked out from raw GFS and HRRR output by make_airmetcast.py.
   airmetcast:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -105,7 +105,7 @@ jobs:
         with:
           name: ensemble
           path: site/ens
-      # A failed AIRMETcast job leaves its unlisted page saying nothing has been made yet.
+      # A failed AIRMETcast job leaves that page saying nothing has been made yet.
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:

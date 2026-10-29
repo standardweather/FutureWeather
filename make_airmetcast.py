@@ -1,6 +1,7 @@
 """AIRMETcast: experimental AIRMET- and convective SIGMET-style hazard areas, worked out from raw model output.
 
-This is not an official product and is not linked from the rest of the site. It shares only the
+This is not an official product. The unlisted AIRMETcast page that draws it lives in the AviationWeather repo
+(/AviationWeather/airmetcast/) and reads these files from /FutureWeather/airmetcast/data/. It shares only the
 download helpers with make_plots.py; every hazard is computed again from the raw GRIB fields.
 
     python make_airmetcast.py gfs         # Sierra, Tango and Zulu areas from the GFS column, F003–F048 every 3 h
