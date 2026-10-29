@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Hazard Outlook (experimental) | Standard Weather</title>
+  <!-- Unlisted test page: not linked from the site, kept out of search engines. -->
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="description" content="Experimental model-derived aviation hazard areas. Not an AIRMET or SIGMET and not for flight planning." />
+  <meta name="theme-color" content="#070914" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png" />
+  <meta name="color-scheme" content="dark" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Shared theme and console layout from the main site (standardweather.github.io repo). -->
+  <link rel="stylesheet" href="/css/site.css?v=20261024a" />
+  <link rel="stylesheet" href="/css/console.css?v=2" />
+  <style>
+    .exp { margin: 0.9rem 1.25rem 0.2rem; padding: 0.55rem 0.75rem; border: 1px dashed #ffbf47; border-radius: 8px; background: rgba(255, 191, 71, 0.07);
+      font-size: 0.78rem; line-height: 1.45; color: var(--text2); }
+    .exp b { color: #ffbf47; }
+    .grp { padding: 0.6rem 1.25rem 0.2rem; border-top: 1px solid var(--rule); }
+    .grp h4 { margin: 0 0 0.35rem; font: 600 0.72rem var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
+    .checks.one { grid-template-columns: 1fr; gap: 0.4rem; padding-bottom: 0.4rem; }
+    .checks.one label { font-size: 0.84rem; }
+    .checks.one label small { margin-left: auto; font: 0.7rem var(--mono); color: var(--text3); }
+    .sw { width: 0.9rem; height: 0.65rem; border-radius: 2px; border: 1.5px dashed currentColor; flex: none; }
+    .sw.line { height: 0; border-width: 0 0 2px; }
+    .altf { padding: 0.6rem 1.25rem 0.8rem; border-top: 1px solid var(--rule); }
+    .altf h4 { margin: 0 0 0.35rem; font: 600 0.72rem var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
+    .altf input { width: 100%; accent-color: var(--accent); appearance: auto; -webkit-appearance: auto; padding: 0; border: 0; background: none; min-height: 0; box-shadow: none; }
+    .altf output { font: 500 0.85rem var(--mono); color: #fff; }
+    .areas { padding: 0.4rem 0 0.8rem; border-top: 1px solid var(--rule); }
+    .areas h4 { margin: 0.3rem 1.25rem 0.3rem; font: 600 0.72rem var(--font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
+    .area { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 0.6rem 1fr auto; gap: 0.55rem; align-items: baseline; width: 100%;
+      padding: 0.35rem 1.25rem; cursor: pointer; font-size: 0.82rem; color: var(--text2); }
+    .area:hover { background: rgba(255, 255, 255, 0.04); color: #fff; }
+    .area i { width: 0.6rem; height: 0.6rem; border-radius: 2px; }
+    .area span small { display: block; color: var(--text3); font-size: 0.72rem; }
+    .area b { font: 500 0.76rem var(--mono); color: #fff; font-weight: 500; white-space: nowrap; }
+    .method { margin: 0 1.25rem 1rem; font-size: 0.78rem; color: var(--text2); }
+    .method summary { cursor: pointer; color: var(--text2); }
+    .method p, .method li { line-height: 1.5; }
+    .method ul { padding-left: 1.1rem; margin: 0.4rem 0; }
+    .hz-label { background: rgba(8, 10, 24, 0.82); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 5px; color: #fff; box-shadow: none;
+      font: 500 0.68rem var(--mono); padding: 1px 5px; white-space: nowrap; }
+    .hz-label::before { display: none; }
+    .leaflet-popup-content { font-size: 0.82rem; }
+    .pop h4 { margin: 0 0 0.3rem; font-size: 0.9rem; }
+    .pop table { border-collapse: collapse; }
+    .pop td { padding: 1px 0.6rem 1px 0; vertical-align: top; }
+    .pop td:first-child { color: #8a90ad; }
+    .pop .xp { margin: 0.4rem 0 0; font-size: 0.72rem; color: #ffbf47; }
+    .wm { position: absolute; z-index: 700; left: 50%; transform: translateX(-50%); top: 0.6rem; padding: 0.25rem 0.7rem; border-radius: 6px;
+      background: rgba(8, 10, 24, 0.85); border: 1px dashed #ffbf47; font: 500 0.74rem var(--mono); color: #ffbf47; pointer-events: none; white-space: nowrap; }
+    .maplegend { width: 15.5rem; }
+    .maplegend .row { display: flex; align-items: center; gap: 0.45rem; font-size: 0.72rem; color: var(--text2); margin-top: 0.2rem; }
+    .scrub .when { min-width: 9.5rem; text-align: right; }
+    .scrub .when small { display: block; color: var(--text3); font: 0.7rem var(--mono); }
+    @media (max-width: 700px) { .wm { font-size: 0.62rem; top: 0.5rem; left: 0.6rem; transform: none; } .wm__long { display: none; } .hz-label { font-size: 0.6rem; } }
+  </style>
+</head>
+<body class="console">
+  <nav class="site-nav" aria-label="Primary">
+    <div class="site-nav__inner">
+      <a class="site-nav__brand" href="/" title="Standard Weather home">
+        <img src="/assets/logo-light.png" width="32" height="32" alt="" />
+        Standard Weather
+      </a>
+      <ul class="site-nav__links">
+        <li><a href="/FutureWeather/">FutureWeather</a></li>
+        <li><a href="/AviationWeather/">AviationWeather</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <div class="app">
+    <aside class="side" aria-label="Hazard outlook">
+      <div class="side__head"><h1><span>Hazard</span>Outlook</h1><time id="run"></time></div>
+      <div class="scroll" id="panel">
+        <p class="exp"><b>Experimental.</b> These areas are worked out automatically from raw model output using AIRMET and convective SIGMET criteria. They are not AIRMETs, SIGMETs or any official product, and are not for flight planning. Use <a href="https://aviationweather.gov/" target="_blank" rel="noopener">aviationweather.gov</a> and an official briefing.</p>
+        <div id="hazards"></div>
+        <div class="altf">
+          <h4>Altitude</h4>
+          <input type="range" id="alt" min="-1" max="45" step="1" value="-1" aria-label="Show areas at this altitude" />
+          <output id="altLabel">All altitudes</output>
+        </div>
+        <div class="grp"><h4>Map</h4><div class="checks one">
+          <label><input type="checkbox" id="official" /> Official G-AIRMETs at the same time <small id="offNote"></small></label>
+          <label><input type="checkbox" id="labels" checked /> Labels</label>
+        </div></div>
+        <div class="areas" id="areas"></div>
+        <details class="method"><summary>How these are made</summary>
+          <ul>
+            <li><b>IFR:</b> model ceiling under 1,000 ft or visibility under 3 SM over at least half of a ~60 km box.</li>
+            <li><b>Mountain obscuration:</b> cloud base at or below the ridge tops in mountainous terrain.</li>
+            <li><b>Turbulence:</b> five diagnostics per layer (Ellrod TI1 and TI2, inverse Richardson number, frontogenesis, vertical shear), each mapped to an eddy dissipation rate scale fitted on past GFS runs and averaged, plus boundary-layer and mountain wave terms. Moderate is EDR 0.22 or more; split at FL180.</li>
+            <li><b>Surface wind and LLWS:</b> sustained 10 m wind of 30 kt or more; 30 kt or more of wind change between 10 m and 2,000 ft AGL.</li>
+            <li><b>Icing:</b> supercooled cloud and rain water, temperature, cloud-top temperature and lift, level by level. Freezing levels come from the raw temperature profile.</li>
+            <li><b>Convective (HRRR):</b> simulated reflectivity of 40 dBZ or more covering 40% of an area, drawn as an area, a line or an isolated cell, with echo tops, motion between model hours, and supercell, hail and wind tags.</li>
+          </ul>
+          <p>Areas under 3,000 sq mi are left out, as for real AIRMETs. Thresholds are first guesses and have not been checked against pilot reports yet.</p>
+        </details>
+      </div>
+      <div class="side__foot">
+        <div class="satpick" id="models" role="group" aria-label="Model"><span>Model</span></div>
+      </div>
+    </aside>
+
+    <section class="stage" aria-label="Map">
+      <div id="map"></div>
+      <div class="wm">EXPERIMENTAL<span class="wm__long"> · MODEL-DERIVED</span> · NOT AN AIRMET/SIGMET</div>
+      <div class="status" id="status" hidden></div>
+      <div class="scrub" id="scrub">
+        <button id="prev" aria-label="Previous forecast hour">◀</button>
+        <button id="play" aria-label="Play">▶</button>
+        <button id="next" aria-label="Next forecast hour">▶</button>
+        <input type="range" id="hour" min="0" max="0" value="0" aria-label="Forecast hour" />
+        <b class="when" id="hourLabel"></b>
+      </div>
+    </section>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js?v=1"></script>
+</body>
+</html>

@@ -4,3 +4,4 @@ site/models/
 __pycache__/
 .claude/
 site/ens/
+site/aviation-outlook/data/
