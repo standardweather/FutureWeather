@@ -10,7 +10,9 @@ byte offsets in each file's .idx index):
     python make_plots.py gfs        # or nbm, hrrr, ecmwf
 
 Output, per model:
-  site/img/<model>/<product>_f<hhh>.png   one transparent overlay per product per forecast hour
+  site/img/<model>/<product>_f<hhh>.png   one transparent overlay per product per forecast hour, or for a product
+                                          made of layers (cloud cover, pressure lines, ...), one per layer:
+  site/img/<model>/<product>-<layer>_f<hhh>.png   so the page can turn each part on and off
   site/img/<model>/surface_f<hhh>.json    forecast station plot values for the Surface map (see site/stations.json)
   site/models/<model>.json                run info, products and legends
 
@@ -114,6 +116,7 @@ CEILING_CATS = [  # (upper bound ft AGL, label, color): standard flight-category
     (1000, "IFR 500–999 ft", "#ff453a"),
     (3000, "MVFR 1,000–3,000 ft", "#4ad1ff"),
 ]
+CEILING_LAYERS = ["lifr", "ifr", "mvfr"]   # layer ids, in CEILING_CATS order
 
 # Shared hazard scale for turbulence and icing: muted teal for low values, then cyan, amber, orange, red.
 HAZARD_COLORS = ["#2b6f86", "#4ad1ff", "#ffd166", "#ff9f43", "#ff453a"]
@@ -277,6 +280,37 @@ def save(fig, path):
     Image.open(buf).convert("RGBA").quantize(colors=200, method=Image.Quantize.FASTOCTREE).save(path, optimize=True)
 
 
+class Canvas:
+    """The overlays of one product at one forecast hour. canvas("mslp") is the axes of the product's "mslp"
+    layer, drawn and saved as its own transparent image; canvas() is the single overlay of a product without
+    layers. json_path is where a product can write extra data for the hour (the Surface map's station plots)."""
+
+    def __init__(self, json_path):
+        self.figs, self.json_path = {}, json_path
+
+    def __call__(self, layer=None):
+        if layer not in self.figs:
+            self.figs[layer] = new_overlay()
+        return self.figs[layer][1]
+
+
+def layer(lid, name, legend=None, key=None, line=None):
+    """One part of a product that the page can turn on and off, with its share of the legend: a color scale
+    (legend), swatches (key: [[color, label]]) or a note on what its lines mean (line)."""
+    out = {"id": lid, "name": name}
+    if legend:
+        out["legend"] = legend
+    if key:
+        out["key"] = key
+    if line:
+        out["line"] = line
+    return out
+
+
+def product(pid, name, draw, legend, note=None, layers=None):
+    return {"id": pid, "name": name, "draw": draw, "legend": legend, "note": note, "layers": layers}
+
+
 def shade(ax, x, y, values, scale, **kw):
     cmap, norm = scale
     return ax.contourf(x, y, values, levels=norm.boundaries, cmap=cmap, norm=norm, zorder=2, **kw)
@@ -344,46 +378,42 @@ def gfs_fields(fhr):
     return wanted
 
 
-def gfs_precip(f, path):
+def gfs_precip(f, canvas):
     x, y = lonlat(f["mslp"])
-    fig, ax = new_overlay()
-    shade(ax, x, y, f["apcp"].values / 25.4, PRECIP)   # mm -> in
-    contours(ax, x, y, gaussian_filter(f["mslp"].values / 100, sigma=1.5), np.arange(940, 1061, 4))
-    save(fig, path)
+    shade(canvas("precip"), x, y, f["apcp"].values / 25.4, PRECIP)   # mm -> in
+    contours(canvas("mslp"), x, y, gaussian_filter(f["mslp"].values / 100, sigma=1.5), np.arange(940, 1061, 4))
 
 
-def gfs_vort700(f, path):
+def gfs_vort700(f, canvas):
     u, v, hgt = f["u700"], f["v700"], f["z700"]
     x, y = lonlat(hgt)
     vort = mpcalc.vorticity(u.metpy.quantify(), v.metpy.quantify())
     vort = gaussian_filter(vort.metpy.dequantify().values * 1e5, sigma=2)
-    fig, ax = new_overlay()
-    shade(ax, x, y, vort, VORT, extend="both")
-    contours(ax, x, y, gaussian_filter(hgt.values / 10, sigma=1.5), np.arange(240, 330, 3))
-    barbs(ax, x, y, u, v)
-    save(fig, path)
+    shade(canvas("vort"), x, y, vort, VORT, extend="both")
+    contours(canvas("heights"), x, y, gaussian_filter(hgt.values / 10, sigma=1.5), np.arange(240, 330, 3))
+    barbs(canvas("barbs"), x, y, u, v)
 
 
-def gfs_wind200(f, path):
+def gfs_wind200(f, canvas):
     u, v, hgt = f["u200"], f["v200"], f["z200"]
     x, y = lonlat(hgt)
-    fig, ax = new_overlay()
-    shade(ax, x, y, np.hypot(u.values, v.values) * 1.94384, JET, alpha=0.9, extend="max")
-    contours(ax, x, y, gaussian_filter(hgt.values / 10, sigma=1.5), np.arange(1080, 1260, 12))
-    barbs(ax, x, y, u, v)
-    save(fig, path)
+    shade(canvas("speed"), x, y, np.hypot(u.values, v.values) * 1.94384, JET, alpha=0.9, extend="max")
+    contours(canvas("heights"), x, y, gaussian_filter(hgt.values / 10, sigma=1.5), np.arange(1080, 1260, 12))
+    barbs(canvas("barbs"), x, y, u, v)
 
 
-def gfs_clouds(f, path):
+def gfs_clouds(f, canvas):
     x, y = lonlat(f["tcdc"])
     ceil = f["ceil"].values
     # Ceiling is a height above sea level; 20,000 m means no ceiling.
     ceil_ft = np.where(ceil < 15000, (ceil - f["zsfc"].values) * 3.28084, np.nan)
-    fig, ax = new_overlay()
-    shade(ax, x, y, f["tcdc"].values, CLOUD)
-    ax.contourf(x, y, ceil_ft, levels=[0] + [c[0] for c in CEILING_CATS],
-                colors=[c[2] for c in CEILING_CATS], alpha=0.85, zorder=2.5)
-    save(fig, path)
+    shade(canvas("cloud"), x, y, f["tcdc"].values, CLOUD)
+    # Each flight category is its own layer: LIFR below 500 ft, IFR 500-999 ft, MVFR 1,000-3,000 ft.
+    lower = 0
+    for (upper, _, color), lid in zip(CEILING_CATS, CEILING_LAYERS):
+        if ((ceil_ft >= lower) & (ceil_ft < upper)).any():   # an empty layer is still saved, blank
+            canvas(lid).contourf(x, y, ceil_ft, levels=[lower, upper], colors=[color], alpha=0.85, zorder=2.5)
+        lower = upper
 
 
 def ellrod_ti2(f):
@@ -404,13 +434,11 @@ def ellrod_ti2(f):
     return gaussian_filter(np.clip(best, 0, None), sigma=1)
 
 
-def gfs_turb(f, path):
+def gfs_turb(f, canvas):
     x, y = lonlat(f["u250"])
     jet = gaussian_filter(np.hypot(f["u250"].values, f["v250"].values) * 1.94384, sigma=1)
-    fig, ax = new_overlay()
-    shade(ax, x, y, ellrod_ti2(f), TURB, extend="max")
-    contours(ax, x, y, jet, [70, 90, 110, 130, 150, 170], width=0.8)
-    save(fig, path)
+    shade(canvas("ti2"), x, y, ellrod_ti2(f), TURB, extend="max")
+    contours(canvas("isotachs"), x, y, jet, [70, 90, 110, 130, 150, 170], width=0.8)
 
 
 def icing_potential(f):
@@ -430,13 +458,11 @@ def icing_potential(f):
     return gaussian_filter(best, sigma=1)
 
 
-def gfs_icing(f, path):
+def gfs_icing(f, canvas):
     x, y = lonlat(f["psfc"])
-    fig, ax = new_overlay()
-    shade(ax, x, y, icing_potential(f), ICE)
-    contours(ax, x, y, gaussian_filter(f["frzl"].values * 3.28084 / 1000, sigma=1.5), np.arange(2, 17, 2),
+    shade(canvas("potential"), x, y, icing_potential(f), ICE)
+    contours(canvas("frzl"), x, y, gaussian_filter(f["frzl"].values * 3.28084 / 1000, sigma=1.5), np.arange(2, 17, 2),
              color="#c9d2f0", width=0.7, dashed=True)
-    save(fig, path)
 
 
 # ---------------------------------------------------------------- NBM
@@ -459,11 +485,9 @@ def nbm_fields(fhr):
 
 
 def simple(field, scale, convert=lambda v: v):
-    def draw(f, path):
+    def draw(f, canvas):
         x, y = lonlat(f[field])
-        fig, ax = new_overlay()
-        shade(ax, x, y, convert(f[field].values), scale, extend="max" if scale is not TEMP else "both")
-        save(fig, path)
+        shade(canvas(), x, y, convert(f[field].values), scale, extend="max" if scale is not TEMP else "both")
     return draw
 
 
@@ -500,14 +524,12 @@ def hrrr_fields(fhr):
     }
 
 
-def hrrr_severe(f, path):
+def hrrr_severe(f, canvas):
     """Surface-based CAPE, with 0–6 km bulk shear contoured. HRRR labels the shear 1/s but stores m/s."""
     x, y = lonlat(f["cape"])
     shear = gaussian_filter(np.hypot(f["ushr"].values, f["vshr"].values) * 1.94384, sigma=2)
-    fig, ax = new_overlay()
-    shade(ax, x, y, f["cape"].values, CAPE, extend="max")
-    contours(ax, x, y, shear, [30, 40, 50, 60, 70], width=0.8)
-    save(fig, path)
+    shade(canvas("cape"), x, y, f["cape"].values, CAPE, extend="max")
+    contours(canvas("shear"), x, y, shear, [30, 40, 50, 60, 70], width=0.8)
 
 
 # ---------------------------------------------------------------- ECMWF
@@ -631,26 +653,26 @@ def ecmwf_surface_prep(f):
 
 
 def surface(prep):
-    def draw(f, path):
+    def draw(f, canvas):
         s = prep(f)
         x, y = lonlat(s["grid"])
         rate = s["rate"] / 25.4   # mm/h -> in/h
         # Wet spots with no type flagged (rare, at type boundaries) are drawn as rain.
         ptype = np.where((s["ptype"] == 0) & (rate >= RATE_LEVELS[0]), 1, s["ptype"])
-        fig, ax = new_overlay()
-        shade(ax, x, y, s["tcc"], SKY)
+        shade(canvas("clouds"), x, y, s["tcc"], SKY)
         rate = np.minimum(rate, RATE_LEVELS[-1] * 0.999)   # the top bin also holds anything heavier
+        ax = canvas("precip")
         for code, _, colors in PTYPES:
             if (ptype == code).any():
                 shade(ax, x, y, np.where(ptype == code, rate, np.nan), binned(RATE_LEVELS, colors))
         # White lines with a dark edge read over both clear (dark) and overcast (light gray) areas.
+        ax = canvas("mslp")
         halo = [pe.withStroke(linewidth=2.6, foreground="#0b1022")]
         cs = ax.contour(x, y, s["mslp"], levels=np.arange(940, 1061, 4), colors="#ffffff", linewidths=1, zorder=4)
         cs.set(path_effects=halo)
         for t in ax.clabel(cs, fmt="%d", fontsize=8, inline=True, inline_spacing=2):
             t.set_path_effects(halo)
-        save(fig, path)
-        write_stations(s, ptype, s["rate"] / 25.4, path.with_suffix(".json"))
+        write_stations(s, ptype, s["rate"] / 25.4, canvas.json_path)
     return draw
 
 
@@ -685,6 +707,15 @@ def surface_legend():
     leg["under"] = legend("Cloud cover (%)", SKY_LEVELS, SKY[0])
     leg["stations"] = True
     return leg
+
+
+def surface_layers():
+    """Bottom to top. The station plots, drawn by the page, are one more layer on top."""
+    rate = legend("Precipitation rate (in/h) by type", RATE_LEVELS, binned(RATE_LEVELS, PTYPES[0][2])[0])
+    rate["ramps"] = [[name, colors] for _, name, colors in PTYPES]
+    return [layer("clouds", "Cloud cover", legend("Cloud cover (%)", SKY_LEVELS, SKY[0])),
+            layer("precip", "Precipitation rate", rate),
+            layer("mslp", "Sea-level pressure", line="White lines: sea-level pressure, every 4 hPa")]
 
 
 # ---------------------------------------------------------------- Upper air map
@@ -755,18 +786,18 @@ def highs_and_lows(ax, x, y, mslp, size=60):
                         ha="center", va="top", zorder=7, path_effects=halo)
 
 
-def upper_air(f, path):
+def upper_air(f, canvas):
     x, y = lonlat(f["z500"])
-    fig, ax = new_overlay()
-    shade(ax, x, y, f["pwat"].values / 25.4, PWAT, alpha=0.8)   # mm -> in
+    shade(canvas("pwat"), x, y, f["pwat"].values / 25.4, PWAT, alpha=0.8)   # mm -> in
     jet = gaussian_filter(np.hypot(f["u250"].values, f["v250"].values) * 1.94384, sigma=1)
-    shade(ax, x, y, np.minimum(jet, JET250_LEVELS[-1] - 0.01), JET250, alpha=0.85)
+    shade(canvas("jet"), x, y, np.minimum(jet, JET250_LEVELS[-1] - 0.01), JET250, alpha=0.85)
     vort = mpcalc.vorticity(f["u500"].metpy.quantify(), f["v500"].metpy.quantify())
     vort = gaussian_filter(vort.metpy.dequantify().values * 1e5, sigma=4)
-    shade(ax, x, y, np.minimum(vort, VORT500_LEVELS[-1] - 0.01), VORT500, alpha=0.8)
+    shade(canvas("vort"), x, y, np.minimum(vort, VORT500_LEVELS[-1] - 0.01), VORT500, alpha=0.8)
 
     # Sea-level pressure: thin gray isobars under everything else.
     mslp = gaussian_filter(f["mslp"].values / 100, sigma=3)
+    ax = canvas("mslp")
     cs = ax.contour(x, y, mslp, levels=np.arange(940, 1061, 4), colors="#a3abbd", linewidths=0.6, zorder=3)
     ax.clabel(cs, fmt="%d", fontsize=7, inline=True, inline_spacing=2)
 
@@ -776,11 +807,12 @@ def upper_air(f, path):
     spd = np.hypot(u, v)
     s = (slice(4, None, 8), slice(4, None, 8))
     keep = spd[s] * 1.94384 >= 20
-    ax.quiver(x[s][keep], y[s][keep], (u / np.maximum(spd, 0.1))[s][keep], (v / np.maximum(spd, 0.1))[s][keep],
+    canvas("wind850").quiver(x[s][keep], y[s][keep], (u / np.maximum(spd, 0.1))[s][keep], (v / np.maximum(spd, 0.1))[s][keep],
               color="#d6dcea", alpha=0.85, scale=90, width=0.0013, headwidth=4, headlength=4, headaxislength=3.6,
               pivot="middle", zorder=6)
 
     # 500 mb heights every 6 dam, white with a dark edge, then red or blue where they are unusually high or low.
+    ax = canvas("z500")
     halo = [pe.withStroke(linewidth=3.2, foreground="#0b1022")]
     z = gaussian_filter(f["z500"].values / 10, sigma=2)
     cs = ax.contour(x, y, z, levels=np.arange(456, 613, 6), colors="#ffffff", linewidths=1.5, zorder=5)
@@ -791,8 +823,7 @@ def upper_air(f, path):
     if CLIMATE is not None:   # after the labels, so the colored runs break around them too
         anomaly_lines(ax, cs, x, y, gaussian_filter(z500_anomaly(f["z500"], f["valid"]), sigma=2))
 
-    highs_and_lows(ax, x, y, mslp)
-    save(fig, path)
+    highs_and_lows(canvas("hilo"), x, y, mslp)
 
 
 def upper_air_legend():
@@ -804,6 +835,18 @@ def upper_air_legend():
     return leg
 
 
+def upper_air_layers():
+    """Bottom to top, in the order the single composite used to stack them."""
+    return [layer("pwat", "Precipitable water", legend("Precipitable water (in)", PWAT_LEVELS, PWAT[0])),
+            layer("jet", "250 mb jet stream", legend("250 mb wind (kt)", JET250_LEVELS, JET250[0])),
+            layer("vort", "500 mb vorticity", legend("500 mb vorticity (10⁻⁵ s⁻¹, smoothed)", VORT500_LEVELS, VORT500[0])),
+            layer("mslp", "Sea-level pressure", line="Gray lines: sea-level pressure (hPa)"),
+            layer("z500", "500 mb heights & anomalies", line="White lines: 500 mb heights (dam)",
+                  key=[[ANOM_HIGH, "Heights 2σ+ above normal"], [ANOM_LOW, "2σ+ below normal"]]),
+            layer("wind850", "850 mb wind arrows", line="Arrows: 850 mb wind of 20 kt or more"),
+            layer("hilo", "Highs and lows", line="H and L: sea-level highs and lows (hPa)")]
+
+
 UPPER_AIR_NOTE = ("Green is precipitable water, the moisture in the whole column; blue to pink is the 250 mb jet stream; "
                   "yellow to red is spin at 500 mb, which marks troughs and shortwaves that lift the air. "
                   "500 mb height lines turn red or blue where heights are at least two standard deviations above or "
@@ -813,41 +856,69 @@ UPPER_AIR_NOTE = ("Green is precipitable water, the moisture in the whole column
 
 # ---------------------------------------------------------------- models
 
+LINES_PRESSURE = "White lines: sea-level pressure, every 4 hPa"
+CLOUDS_LEGEND = legend("Total cloud cover (%)", CLOUD_LEVELS, CLOUD[0], extra=[[c[2], c[1]] for c in CEILING_CATS])
+CLOUDS_LAYERS = [layer("cloud", "Cloud cover", legend("Total cloud cover (%)", CLOUD_LEVELS, CLOUD[0]))] + [
+    layer(lid, label.split(" ")[0] + " ceilings", key=[[color, label]])
+    for lid, (_, label, color) in reversed(list(zip(CEILING_LAYERS, CEILING_CATS)))]   # MVFR, IFR, LIFR
+
+
+def surface_product(prep):
+    return product("surface", "Surface map", surface(prep), surface_legend(), SURFACE_NOTE, surface_layers())
+
+
+UPPER_AIR = product("upper", "Upper air map", upper_air, upper_air_legend(), UPPER_AIR_NOTE, upper_air_layers())
+PRECIP_MSLP = product("precip_mslp", "Precip & pressure", gfs_precip,
+                      legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines=LINES_PRESSURE),
+                      layers=[layer("precip", "6-hour precipitation", legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
+                              layer("mslp", "Sea-level pressure", line=LINES_PRESSURE)])
+VORT700 = product("vort700", "700 mb vorticity", gfs_vort700,
+                  legend("Relative vorticity (10⁻⁵ s⁻¹)", VORT_LEVELS, VORT[0], lines="White lines: 700 mb heights (dam) · barbs: wind (kt)"),
+                  layers=[layer("vort", "Vorticity", legend("Relative vorticity (10⁻⁵ s⁻¹)", VORT_LEVELS, VORT[0])),
+                          layer("heights", "700 mb heights", line="White lines: 700 mb heights (dam)"),
+                          layer("barbs", "Wind barbs", line="Barbs: wind (kt)")])
+WIND200 = product("wind200", "200 mb jet stream", gfs_wind200,
+                  legend("Wind speed (kt)", JET_LEVELS, JET[0], lines="White lines: 200 mb heights (dam) · barbs: wind (kt)"),
+                  layers=[layer("speed", "Wind speed", legend("Wind speed (kt)", JET_LEVELS, JET[0])),
+                          layer("heights", "200 mb heights", line="White lines: 200 mb heights (dam)"),
+                          layer("barbs", "Wind barbs", line="Barbs: wind (kt)")])
+
 MODELS = {
     "gfs": {
         "name": "GFS", "long": "GFS 0.25°", "source": "NOAA Global Forecast System via AWS Open Data",
         "url": gfs_url, "hours": list(range(6, 169, 6)), "fields": gfs_fields, "decode": {"subset": GFS_SUBSET},
         "products": [
-            ("surface", "Surface map", surface(gfs_surface_prep), surface_legend(), SURFACE_NOTE),
-            ("upper", "Upper air map", upper_air, upper_air_legend(), UPPER_AIR_NOTE),
-            ("precip_mslp", "Precip & pressure", gfs_precip,
-             legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
-            ("vort700", "700 mb vorticity", gfs_vort700,
-             legend("Relative vorticity (10⁻⁵ s⁻¹)", VORT_LEVELS, VORT[0], lines="White lines: 700 mb heights (dam) · barbs: wind (kt)")),
-            ("wind200", "200 mb jet stream", gfs_wind200,
-             legend("Wind speed (kt)", JET_LEVELS, JET[0], lines="White lines: 200 mb heights (dam) · barbs: wind (kt)")),
-            ("clouds", "Clouds & ceilings", gfs_clouds,
-             legend("Total cloud cover (%)", CLOUD_LEVELS, CLOUD[0], extra=[[c[2], c[1]] for c in CEILING_CATS]),
-             "Ceiling is the model's estimate of the lowest broken or overcast cloud base, in feet above ground."),
-            ("turb", "Turbulence", gfs_turb,
-             legend("Ellrod TI2 (10⁻⁷ s⁻²) · light → severe", TURB_LEVELS, TURB[0], lines="White lines: 250 mb isotachs (kt)"),
-             "Clear-air turbulence potential from the Ellrod index (TI2), the highest value in the 400–200 mb "
-             "layer (about FL240–FL390). " + ESTIMATE_NOTE),
-            ("icing", "Icing", gfs_icing,
-             legend("Icing potential · low → high", ICE_LEVELS, ICE[0], lines="Dashed lines: freezing level (thousands of ft)"),
-             "Highest icing potential between 900 and 400 mb, from temperature (0 to −22 °C) and model cloud "
-             "liquid water or humidity. " + ESTIMATE_NOTE),
+            surface_product(gfs_surface_prep),
+            UPPER_AIR,
+            PRECIP_MSLP,
+            VORT700,
+            WIND200,
+            product("clouds", "Clouds & ceilings", gfs_clouds, CLOUDS_LEGEND,
+                    "Ceiling is the model's estimate of the lowest broken or overcast cloud base, in feet above ground.",
+                    CLOUDS_LAYERS),
+            product("turb", "Turbulence", gfs_turb,
+                    legend("Ellrod TI2 (10⁻⁷ s⁻²) · light → severe", TURB_LEVELS, TURB[0], lines="White lines: 250 mb isotachs (kt)"),
+                    "Clear-air turbulence potential from the Ellrod index (TI2), the highest value in the 400–200 mb "
+                    "layer (about FL240–FL390). " + ESTIMATE_NOTE,
+                    [layer("ti2", "Turbulence potential", legend("Ellrod TI2 (10⁻⁷ s⁻²) · light → severe", TURB_LEVELS, TURB[0])),
+                     layer("isotachs", "250 mb isotachs", line="White lines: 250 mb isotachs (kt)")]),
+            product("icing", "Icing", gfs_icing,
+                    legend("Icing potential · low → high", ICE_LEVELS, ICE[0], lines="Dashed lines: freezing level (thousands of ft)"),
+                    "Highest icing potential between 900 and 400 mb, from temperature (0 to −22 °C) and model cloud "
+                    "liquid water or humidity. " + ESTIMATE_NOTE,
+                    [layer("potential", "Icing potential", legend("Icing potential · low → high", ICE_LEVELS, ICE[0])),
+                     layer("frzl", "Freezing level", line="Dashed lines: freezing level (thousands of ft)")]),
         ],
     },
     "nbm": {
         "name": "NBM", "long": "National Blend of Models", "source": "NOAA National Blend of Models via AWS Open Data",
         "url": nbm_url, "hours": list(range(6, 169, 6)), "fields": nbm_fields, "decode": {"step": 2},
         "products": [
-            ("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
-            ("precip", "6-hour precip", simple("apcp", PRECIP, lambda v: v / 25.4), legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
-            ("snow", "6-hour snow", simple("snow", SNOW, lambda v: v * 39.3701), legend("6-hour snowfall (in)", SNOW_LEVELS, SNOW[0])),
-            ("gust", "Wind gusts", simple("gust", GUST, MS_TO_MPH), legend("Wind gust (mph)", GUST_LEVELS, GUST[0])),
-            ("sky", "Sky cover", simple("sky", CLOUD), legend("Sky cover (%)", CLOUD_LEVELS, CLOUD[0])),
+            product("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
+            product("precip", "6-hour precip", simple("apcp", PRECIP, lambda v: v / 25.4), legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
+            product("snow", "6-hour snow", simple("snow", SNOW, lambda v: v * 39.3701), legend("6-hour snowfall (in)", SNOW_LEVELS, SNOW[0])),
+            product("gust", "Wind gusts", simple("gust", GUST, MS_TO_MPH), legend("Wind gust (mph)", GUST_LEVELS, GUST[0])),
+            product("sky", "Sky cover", simple("sky", CLOUD), legend("Sky cover (%)", CLOUD_LEVELS, CLOUD[0])),
         ],
         "note": "The National Blend of Models combines many models and is the starting point for National Weather Service forecasts.",
     },
@@ -855,19 +926,21 @@ MODELS = {
         "name": "HRRR", "long": "HRRR 3 km", "source": "NOAA High-Resolution Rapid Refresh via AWS Open Data",
         "url": hrrr_url, "hours": list(range(1, 49)), "fields": hrrr_fields, "decode": {"step": 2},
         "products": [
-            ("surface", "Surface map", surface(hrrr_surface_prep), surface_legend(), SURFACE_NOTE),
-            ("refc", "Simulated radar", simple("refc", REFL), legend("Composite reflectivity (dBZ)", REFL_LEVELS, REFL[0])),
-            ("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
-            ("precip", "1-hour precip", simple("apcp", PRECIP, lambda v: v / 25.4), legend("1-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
-            ("gust", "Wind gusts", simple("gust", GUST, MS_TO_MPH), legend("Wind gust (mph)", GUST_LEVELS, GUST[0])),
-            ("severe", "Instability & shear", hrrr_severe,
-             legend("Surface-based CAPE (J/kg)", CAPE_LEVELS, CAPE[0], lines="White lines: 0–6 km bulk shear (kt)"),
-             "Storms need instability (CAPE) to grow; 40 kt or more of deep-layer shear lets them organize into "
-             "supercells and lines. Ingredients, not a forecast of storms."),
-            ("uh", "Updraft helicity", simple("uh", UH),
-             legend("2–5 km updraft helicity, hourly max (m²/s²)", UH_LEVELS, UH[0]),
-             "Tracks of rotating updrafts in the model's simulated storms. Values above about 75 often mark "
-             "supercells; the exact place and time will differ."),
+            surface_product(hrrr_surface_prep),
+            product("refc", "Simulated radar", simple("refc", REFL), legend("Composite reflectivity (dBZ)", REFL_LEVELS, REFL[0])),
+            product("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
+            product("precip", "1-hour precip", simple("apcp", PRECIP, lambda v: v / 25.4), legend("1-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0])),
+            product("gust", "Wind gusts", simple("gust", GUST, MS_TO_MPH), legend("Wind gust (mph)", GUST_LEVELS, GUST[0])),
+            product("severe", "Instability & shear", hrrr_severe,
+                    legend("Surface-based CAPE (J/kg)", CAPE_LEVELS, CAPE[0], lines="White lines: 0–6 km bulk shear (kt)"),
+                    "Storms need instability (CAPE) to grow; 40 kt or more of deep-layer shear lets them organize into "
+                    "supercells and lines. Ingredients, not a forecast of storms.",
+                    [layer("cape", "CAPE", legend("Surface-based CAPE (J/kg)", CAPE_LEVELS, CAPE[0])),
+                     layer("shear", "0–6 km shear", line="White lines: 0–6 km bulk shear (kt)")]),
+            product("uh", "Updraft helicity", simple("uh", UH),
+                    legend("2–5 km updraft helicity, hourly max (m²/s²)", UH_LEVELS, UH[0]),
+                    "Tracks of rotating updrafts in the model's simulated storms. Values above about 75 often mark "
+                    "supercells; the exact place and time will differ."),
         ],
         "note": "The HRRR is NOAA's hourly-updated 3 km model. Its 00, 06, 12 and 18Z runs go out 48 hours.",
     },
@@ -876,20 +949,30 @@ MODELS = {
         "url": ecmwf_url, "hours": list(range(6, 169, 6)), "fields": ecmwf_fields, "decode": {"subset": ECMWF_SUBSET},
         "get": ecmwf_get, "every": 12, "index_suffix": ".index",
         "products": [
-            ("surface", "Surface map", surface(ecmwf_surface_prep), surface_legend(), SURFACE_NOTE),
-            ("upper", "Upper air map", upper_air, upper_air_legend(), UPPER_AIR_NOTE),
-            ("precip_mslp", "Precip & pressure", gfs_precip,
-             legend("6-hour precipitation (in)", PRECIP_LEVELS, PRECIP[0], lines="White lines: sea-level pressure, every 4 hPa")),
-            ("vort700", "700 mb vorticity", gfs_vort700,
-             legend("Relative vorticity (10⁻⁵ s⁻¹)", VORT_LEVELS, VORT[0], lines="White lines: 700 mb heights (dam) · barbs: wind (kt)")),
-            ("wind200", "200 mb jet stream", gfs_wind200,
-             legend("Wind speed (kt)", JET_LEVELS, JET[0], lines="White lines: 200 mb heights (dam) · barbs: wind (kt)")),
-            ("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
+            surface_product(ecmwf_surface_prep),
+            UPPER_AIR,
+            PRECIP_MSLP,
+            VORT700,
+            WIND200,
+            product("temp", "Temperature", simple("t2m", TEMP, K_TO_F), legend("2 m temperature (°F)", TEMP_LEVELS, TEMP[0])),
         ],
         "note": "The European Centre's IFS, often the most accurate global model in the medium range. "
                 "Compare it with the GFS to see how much the two agree. Contains modified Copernicus/ECMWF data (CC BY 4.0).",
     },
 }
+
+
+def layer_file(pid, lid, fhr):
+    return f"{pid}-{lid}_f{fhr:03d}.png" if lid else f"{pid}_f{fhr:03d}.png"
+
+
+def draw_product(p, fields, img, fhr):
+    canvas = Canvas(img / f"{p['id']}_f{fhr:03d}.json")
+    for lay in p["layers"] or []:   # every layer gets an image, even one with nothing in it this hour
+        canvas(lay["id"])
+    p["draw"](fields, canvas)
+    for lid, (fig, _) in canvas.figs.items():
+        save(fig, img / layer_file(p["id"], lid, fhr))
 
 
 def run(model_id):
@@ -908,8 +991,8 @@ def run(model_id):
             print(f"  F{fhr:03d} skipped: {e}")
             continue
         fields["valid"] = cycle + timedelta(hours=fhr)
-        for pid, _, draw, *_ in m["products"]:
-            draw(fields, img / f"{pid}_f{fhr:03d}.png")
+        for p in m["products"]:
+            draw_product(p, fields, img, fhr)
         done.append(fhr)
         print(f"  F{fhr:03d} done")
     if not done:
@@ -919,8 +1002,9 @@ def run(model_id):
         "cycle": cycle.strftime("%Y-%m-%dT%HZ"), "init": cycle.isoformat(),
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "hours": done,
-        "products": [{"id": pid, "name": name, "legend": leg, **({"note": rest[0]} if rest else {})}
-                     for pid, name, _, leg, *rest in m["products"]],
+        "products": [{"id": p["id"], "name": p["name"], "legend": p["legend"],
+                      **({"note": p["note"]} if p["note"] else {}), **({"layers": p["layers"]} if p["layers"] else {})}
+                     for p in m["products"]],
     }
     (OUT / "models").mkdir(exist_ok=True)
     (OUT / "models" / f"{model_id}.json").write_text(json.dumps(info, indent=1))

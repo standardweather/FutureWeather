@@ -82,6 +82,9 @@
     @media (max-width: 700px) { .maplegend.surface .lines, .maplegend.surface .bins + .ticks { display: none; } }
     .leaflet-marker-icon.stn, .stn svg { pointer-events: none; }
     .stn svg circle, .stn svg text { pointer-events: visiblePainted; cursor: pointer; }
+    .artcc-label { background: none; border: 0; box-shadow: none; color: #c9d2f0; font: 600 0.72rem var(--mono); letter-spacing: 0.08em; opacity: 0.8;
+      text-shadow: 0 0 3px #0b1022, 0 0 6px #0b1022; padding: 0; }
+    .artcc-label::before { display: none; }
     .scrub .when small { display: block; color: var(--text3); font: 0.7rem var(--mono); }
   </style>
 </head>
@@ -125,8 +128,10 @@
       <details class="layers" id="layerBox">
         <summary><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 13 10 5 10-5"/></svg> Layers</summary>
         <div class="layers__body">
-          <div id="stnToggle" hidden><h4>Model map</h4>
-          <div class="checks"><label><input type="checkbox" id="stnOn" checked /> Station plots</label></div></div>
+          <div id="mapLayers" hidden><h4>Model map</h4>
+          <div class="checks" id="prodLayers"></div></div>
+          <h4>Boundaries</h4>
+          <div class="checks"><label><input type="checkbox" id="artccOn" /> ARTCC boundaries</label></div>
           <h4>Outlooks</h4>
           <div class="checks" id="overlays">
             <label><input type="checkbox" data-wpc="qpf" /> Rain, 7 days</label>
@@ -159,6 +164,6 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/js/workwindows.js?v=1"></script>
   <script src="/js/geocode.js?v=1"></script>
-  <script src="app.js?v=11"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

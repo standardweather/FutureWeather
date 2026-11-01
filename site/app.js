@@ -1,7 +1,9 @@
 /* FutureWeather — model forecast console for standardweather.github.io.
  *
  *   Model maps    GFS, ECMWF, National Blend of Models and HRRR overlays drawn by make_plots.py (GitHub Actions),
- *                 and the Surface map's forecast station plots (stations.json plus a values file per hour)
+ *                 one image per layer that the Layers menu turns on and off, and the Surface map's forecast
+ *                 station plots (stations.json plus a values file per hour)
+ *   FAA           ARTCC boundaries, shared with AviationWeather (/AviationWeather/airmetcast/artcc.json)
  *   NWS API       7-day and hourly forecasts, and the forecast grid behind the 7-day meteogram and work windows (api.weather.gov)
  *   GEFS          NOAA's 31-member ensemble at the point, for forecast confidence (tiles packed by make_ensemble.py)
  *   WPC, SPC, CPC 7-day rainfall, excessive rainfall, day 1–8 severe and 6–14 day outlooks (NOAA map services, drawn live)
@@ -27,7 +29,8 @@
     view: ["windows", "confidence"].includes(params.get("view")) ? params.get("view") : params.get("view") === "forecast" || params.get("loc") ? "forecast" : "maps",
     work: null,
     point: null, pointError: null, openPeriod: null, query: "",
-    compare: params.get("compare") === "1", stations: params.get("stations") !== "0", wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
+    compare: params.get("compare") === "1", stations: params.get("stations") !== "0", artcc: params.get("artcc") === "1",
+    off: new Set((params.get("off") || "").split(",").filter(Boolean)),   // "product.layer" keys turned off wpc: { qpf: false, ero: false, spc: false, cpc: false, eroDay: 0, spcDay: 0, cpcPick: 0 },
   };
 
   // —— Map ————————————————————————————————————————————————————————
@@ -35,44 +38,113 @@
   map.fitBounds([[24, -125], [50, -66]], { animate: false });
   L.control.zoom({ position: "topright" }).addTo(map);
   map.attributionControl.setPrefix("");
-  [["model", 350], ["points", 620], ["labels", 640], ["stations", 645]].forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
+  [["model", 350], ["bounds", 380], ["points", 620], ["labels", 640], ["stations", 645]].forEach(([n, z]) => { map.createPane(n).style.zIndex = z; });
   map.getPane("labels").style.pointerEvents = "none";
   map.getPane("model").style.pointerEvents = "none";
+  map.getPane("bounds").style.pointerEvents = "none";
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, attribution: "Esri" }).addTo(map);
   L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}", { maxZoom: 16, pane: "labels", opacity: 0.85 }).addTo(map);
   map.attributionControl.addAttribution("NOAA");
   const marker = L.layerGroup().addTo(map);
-  let overlay = null;
 
   function setStatus(msg) { $("status").textContent = msg || ""; $("status").hidden = !msg; }
 
   const model = () => state.info.models[state.model];
   const product = () => model().products.find((p) => p.id === state.product) || model().products[0];
-  const imgUrl = (m, pid, fhr) => `img/${m.id}/${pid}_f${pad(fhr, 3)}.png?run=${encodeURIComponent(m.cycle)}`;
+  /** A product's image for one hour: one layer of it ("upper-z500_f012.png"), or the whole map when it has no layers. */
+  const imgUrl = (m, pid, fhr, lid) => `img/${m.id}/${pid}${lid ? `-${lid}` : ""}_f${pad(fhr, 3)}.png?run=${encodeURIComponent(m.cycle)}`;
   const validAt = (m, fhr) => new Date(m.init).getTime() + fhr * 3600e3;
 
-  // Swap the overlay only once the next image has loaded, so the map never flashes empty.
-  let want = null;
+  // —— Model map layers ————————————————————————————————————————————————
+  // Products made of parts (cloud cover, ceilings, pressure lines, heights, barbs...) list them as layers, bottom to
+  // top, each its own transparent image. A product without layers is a single image.
+  const BLANK = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  const layersOf = (p) => p.layers || [null];
+  const layerOn = (p, l) => !l || !state.off.has(`${p.id}.${l.id}`);
+  const shownLayers = (p) => layersOf(p).filter((l) => layerOn(p, l));
+  const loadImg = (url) => new Promise((ok) => { const i = new Image(); i.onload = () => ok(true); i.onerror = () => ok(false); i.src = url; });
+
+  /** Show one product hour on a map: swap the images only once every layer has loaded, so the map never flashes empty. */
+  function showLayers(target, stack, m, p, fhr) {
+    const ls = layersOf(p);
+    const urls = ls.map((l) => (layerOn(p, l) ? imgUrl(m, p.id, fhr, l?.id) : null));
+    const want = urls.join("|");
+    stack.want = want;
+    return Promise.all(urls.map((u) => (u ? loadImg(u) : true))).then((ok) => {
+      if (stack.want !== want) return null;
+      const kind = `${p.id}:${ls.map((l) => l?.id).join(",")}`;
+      if (stack.kind !== kind) {
+        stack.ovs.forEach((o) => o.remove());
+        // Shading at 0.78 lets the base map show through; lines and symbols stay a little crisper.
+        stack.ovs = ls.map((l) => L.imageOverlay(BLANK, state.info.bounds, { pane: "model", opacity: !l || l.legend ? 0.78 : 0.9, interactive: false }).addTo(target));
+        stack.kind = kind;
+      }
+      stack.ovs.forEach((o, i) => o.setUrl(urls[i] && ok[i] ? urls[i] : BLANK));
+      return ok.every(Boolean);
+    });
+  }
+  const stack1 = { ovs: [] }, stack2 = { ovs: [] };
+
   function drawOverlay() {
     const m = model(), p = product(), fhr = m.hours[state.hour];
-    const url = imgUrl(m, p.id, fhr);
-    want = url;
-    const img = new Image();
-    img.onload = () => {
-      if (want !== url) return;
-      if (!overlay) overlay = L.imageOverlay(url, state.info.bounds, { pane: "model", opacity: 0.78, interactive: false }).addTo(map);
-      else overlay.setUrl(url);
-      setStatus("");
-    };
-    img.onerror = () => { if (want === url) setStatus("This map isn't available."); };
-    img.src = url;
+    showLayers(map, stack1, m, p, fhr).then((ok) => { if (ok != null) setStatus(ok ? "" : "This map isn't available."); });
     drawCompare();
     drawStations();
   }
 
+  // The Layers menu lists the current product's layers, plus the station plots on the Surface map.
+  function drawLayerList() {
+    const p = product();
+    const rows = (p.layers || []).map((l) => `<label><input type="checkbox" data-layer="${esc(l.id)}" ${layerOn(p, l) ? "checked" : ""} /> ${esc(l.name)}</label>`);
+    if (p.legend?.stations) rows.push(`<label><input type="checkbox" data-layer="" ${state.stations ? "checked" : ""} /> Station plots</label>`);
+    $("prodLayers").innerHTML = rows.join("");
+    $("mapLayers").hidden = !rows.length;
+  }
+  $("prodLayers").addEventListener("change", (e) => {
+    const id = e.target.dataset.layer;
+    if (id == null) return;
+    if (id === "") { state.stations = e.target.checked; drawStations(); drawCompare(); }
+    else {
+      const k = `${product().id}.${id}`;
+      if (e.target.checked) state.off.delete(k); else state.off.add(k);
+      drawOverlay();
+      preload();
+    }
+    drawLegend();
+    syncUrl();
+  });
+
+  // —— ARTCC boundaries (FAA), the same file AviationWeather uses ————————————————————
+  const ARTCC_URL = "/AviationWeather/airmetcast/artcc.json";
+  let artccData = null;
+  const artccLayer = L.layerGroup().addTo(map), artccLayer2 = L.layerGroup();
+  const boundsRenderer = L.svg({ pane: "bounds" });
+  let boundsRenderer2 = null;
+  async function drawArtcc() {
+    artccLayer.clearLayers(); artccLayer2.clearLayers();
+    map.attributionControl.removeAttribution("FAA");
+    if (!state.artcc) return;
+    artccData ||= fetch(ARTCC_URL).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const gj = await artccData;
+    if (!state.artcc) return;
+    if (!gj) { artccData = null; setStatus("ARTCC boundaries aren't available right now."); return; }
+    map.attributionControl.addAttribution("FAA");
+    const fill = (group, renderer) => {
+      L.geoJSON(gj, { renderer, interactive: false, style: { color: "#c9d2f0", weight: 1.1, opacity: 0.6, fill: false } }).addTo(group);
+      gj.features.forEach((f) => {
+        const c = L.geoJSON(f).getBounds().getCenter();
+        group.addLayer(L.tooltip({ permanent: true, direction: "center", className: "artcc-label", pane: "labels" }).setLatLng(c).setContent(esc(f.properties.id)));
+      });
+    };
+    fill(artccLayer, boundsRenderer);
+    if (map2) fill(artccLayer2, boundsRenderer2);
+  }
+  $("artccOn").checked = state.artcc;
+  $("artccOn").addEventListener("change", (e) => { state.artcc = e.target.checked; drawArtcc(); syncUrl(); });
+
   // —— Compare: GFS and ECMWF side by side, at the same valid time ————————————————
   const COMPARE = { gfs: "ecmwf", ecmwf: "gfs" };
-  let map2 = null, overlay2 = null, syncing = false;
+  let map2 = null, syncing = false;
   /** The other model of the pair, when it has this product. */
   function partner() {
     const other = state.info?.models.find((x) => x.id === COMPARE[model().id]);
@@ -91,6 +163,10 @@
     if (!map2) {
       map2 = L.map("map2", { zoomControl: false, attributionControl: false, minZoom: 3, maxZoom: 10, zoomSnap: 0.5 });
       map2.createPane("model").style.zIndex = 350;
+      map2.createPane("bounds").style.zIndex = 380;
+      map2.getPane("bounds").style.pointerEvents = "none";
+      boundsRenderer2 = L.svg({ pane: "bounds" });
+      artccLayer2.addTo(map2);
       map2.createPane("labels").style.zIndex = 640;
       map2.createPane("stations").style.zIndex = 645;
       map2.getPane("labels").style.pointerEvents = "none";
@@ -102,12 +178,11 @@
       follow(map, map2);
       follow(map2, map);
       map2.on("click", (e) => map.fire("click", e));
+      if (state.artcc) drawArtcc();
     }
     setTimeout(() => { map.invalidateSize(); map2.invalidateSize(); map2.setView(map.getCenter(), map.getZoom(), { animate: false }); }, 0);
     const m = model(), t = validAt(m, m.hours[state.hour]), h2 = nearestHour(other, t);
-    const url = imgUrl(other, product().id, h2);
-    if (!overlay2) overlay2 = L.imageOverlay(url, state.info.bounds, { pane: "model", opacity: 0.78, interactive: false }).addTo(map2);
-    else overlay2.setUrl(url);
+    showLayers(map2, stack2, other, product(), h2);
     plotStations(map2, stationLayer2, other, h2);
     const tag = (x, h) => `${x.name} ${pad(new Date(x.init).getUTCHours())}Z · F${pad(h, 3)}`;
     $("tag1").textContent = tag(m, m.hours[state.hour]);
@@ -185,7 +260,7 @@
 
   function preload() {
     const m = model(), p = product();
-    m.hours.forEach((h) => { new Image().src = imgUrl(m, p.id, h); });
+    shownLayers(p).forEach((l) => m.hours.forEach((h) => { new Image().src = imgUrl(m, p.id, h, l?.id); }));
     if (p.legend?.stations && state.stations) m.hours.forEach((h) => loadStations(m, h));
   }
 
@@ -275,12 +350,9 @@
     });
   }
   function drawStations() {
-    $("stnToggle").hidden = !product().legend?.stations;
     plotStations(map, stationLayer, model(), model().hours[state.hour]);
   }
   map.on("moveend", () => { if (state.info) drawStations(); });
-  $("stnOn").checked = state.stations;
-  $("stnOn").addEventListener("change", (e) => { state.stations = e.target.checked; drawStations(); drawCompare(); syncUrl(); });
 
   // —— Legend ———————————————————————————————————————————————————————
   const Legend = L.Control.extend({ options: { position: "topleft" }, onAdd() { const d = L.DomUtil.create("div", "maplegend"); d.id = "legend"; return d; } });
@@ -293,8 +365,27 @@
     const every = n > 18 ? 6 : n > 10 || (wide && n > 6) || (lg.ramps && n > 5) ? 2 : 1;
     return `<div class="ticks">${lg.levels.map((v, i) => (i % every === 0 ? `<span style="left:${(i / n) * 100}%">${lg.ramps ? String(v).replace(/^0\./, ".") : v}</span>` : "")).join("")}</div>`;
   }
+  const scaleHtml = (x) => `<h5 class="sub">${esc(x.label)}</h5>${x.ramps
+    ? `${x.ramps.map(([name, colors]) => `<div class="ramp"><span>${esc(name)}</span>${bins(colors)}</div>`).join("")}<div class="ramp"><span></span>${ticks(x)}</div>`
+    : bins(x.colors) + ticks(x)}`;
+  const STATION_KEY = `<p class="lines stnkey">Stations: <b style="color:#ff6b5a">temp</b> <b style="color:#3fcf9a">dew pt</b> °F · <b style="color:#c9a2ff">pressure</b> · <b style="color:#ff9f43">G gust</b> · barbs in kt</p>`;
+  /** A layered product's legend holds only the layers that are on. */
+  function layersLegend(p) {
+    const on = p.layers.filter((l) => layerOn(p, l));
+    const scales = on.filter((l) => l.legend).map((l) => l.legend);
+    const keys = on.flatMap((l) => l.key || []), lines = on.filter((l) => l.line).map((l) => l.line);
+    const stations = p.legend?.stations && state.stations;
+    $("legend").classList.toggle("surface", scales.length > 1 || scales.some((x) => x.ramps));
+    $("legend").innerHTML = `${scales.map(scaleHtml).join("")}
+      ${keys.length ? `<div class="key">${keys.map(([c, l]) => `<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>` : ""}
+      ${lines.length ? `<p class="lines">${esc(lines.join(" · "))}</p>` : ""}
+      ${stations ? STATION_KEY : ""}`;
+    $("legend").hidden = !(scales.length || keys.length || lines.length || stations);
+  }
   function drawLegend() {
-    const lg = product().legend;
+    const p = product(), lg = p.legend;
+    $("legend").hidden = false;
+    if (p.layers) { layersLegend(p); return; }
     if (!lg) { $("legend").innerHTML = ""; return; }
     // The Surface map has one ramp per precipitation type on a shared scale, then cloud cover.
     const scale = lg.ramps
@@ -307,7 +398,7 @@
       ${(lg.more || []).map((x) => `<h5 class="sub">${esc(x.label)}</h5>${bins(x.colors)}${ticks(x)}`).join("")}
       ${lg.extra ? `<div class="key">${lg.extra.map(([c, l]) => `<span><i style="background:${c}"></i>${esc(l)}</span>`).join("")}</div>` : ""}
       ${lg.lines ? `<p class="lines">${esc(lg.lines)}</p>` : ""}
-      ${lg.stations ? `<p class="lines stnkey">Stations: <b style="color:#ff6b5a">temp</b> <b style="color:#3fcf9a">dew pt</b> °F · <b style="color:#c9a2ff">pressure</b> · <b style="color:#ff9f43">G gust</b> · barbs in kt</p>` : ""}`;
+      ${lg.stations ? STATION_KEY : ""}`;
   }
 
   // —— Time controls ————————————————————————————————————————————————
@@ -349,6 +440,7 @@
       state.hour = best;
     }
     document.querySelectorAll("#models [data-model]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.model === m.id));
+    drawLayerList();
     $("run").textContent = `${m.name} ${pad(new Date(m.init).getUTCHours())}Z ${new Date(m.init).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
     drawLegend();
     drawHour();
@@ -372,6 +464,8 @@
     }
     if (state.compare) q.set("compare", "1");
     if (!state.stations) q.set("stations", "0");
+    if (state.off.size) q.set("off", [...state.off].join(","));
+    if (state.artcc) q.set("artcc", "1");
     history.replaceState(null, "", `?${q}`);
   }
 
@@ -581,7 +675,7 @@
     if (e.target.closest("[data-compare]")) { state.compare = !state.compare; drawCompare(); render(); syncUrl(); return; }
     const b = e.target.closest("[data-product], [data-period]");
     if (!b) return;
-    if (b.dataset.product) { state.product = b.dataset.product; drawLegend(); drawHour(); preload(); render(); return; }
+    if (b.dataset.product) { state.product = b.dataset.product; drawLayerList(); drawLegend(); drawHour(); preload(); render(); return; }
     const i = +b.dataset.period;
     state.openPeriod = state.openPeriod === i ? null : i;
     render();
@@ -799,6 +893,7 @@
   // —— Load ————————————————————————————————————————————————————————
   async function init() {
     setTabs();
+    drawArtcc();
     setStatus("Loading model maps…");
     try {
       const res = await fetch(`data.json?t=${Date.now()}`, { cache: "no-store" });
