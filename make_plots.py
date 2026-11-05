@@ -160,6 +160,14 @@ PTYPES = [  # (code, name, colors). Codes are what the station files and draw_su
     (4, "Freezing rain", ["#ffd0e4", "#ffa0c8", "#ff6fae", "#f03c90", "#c81e70", "#9a0f55", "#6e063c"]),
 ]
 
+# Cloud top height (thousands of ft): grays for low and mid-level tops, brightening to white near 30,000 ft,
+# then the cold colors of enhanced satellite imagery for the tallest tops (thunderstorms, deep cirrus).
+TOPS_LEVELS = [0, 3, 6, 10, 15, 20, 25, 30, 35, 40, 45, 50]
+TOPS = binned(TOPS_LEVELS, ["#3a3f4b", "#4f5563", "#686f7e", "#858c9b", "#a5abb7", "#c8ccd4", "#eef0f4",
+                            "#4ad1ff", "#2f7fe8", "#8f6bff", "#e04fd0"])
+ECHO_TOPS = [25, 35, 45]   # thousands of ft; echo top contours
+FT = 3.28084
+
 # NWS radar colors.
 REFL_LEVELS = list(range(5, 80, 5))
 REFL = binned(REFL_LEVELS, ["#04e9e7", "#019ff4", "#0300f4", "#02fd02", "#01c501", "#008e00", "#fdf802",
@@ -177,13 +185,17 @@ def read_index(url):
     return entries
 
 
-def byte_range(index, match, url):
-    """Byte range of the first message matching. A match ending in "$" must equal the whole description,
-    which keeps NBM's probability and percentile fields from matching the deterministic one."""
+def byte_range(index, match, url, nth=0):
+    """Byte range of the first message matching (or the nth, counting from 0, when several share a
+    description). A match ending in "$" must equal the whole description, which keeps NBM's probability and
+    percentile fields from matching the deterministic one."""
     exact = match.endswith("$")
     want = match[:-1].rstrip(":")
     for i, (start, desc) in enumerate(index):
         if (desc.rstrip(":") == want) if exact else (match in desc):
+            if nth:
+                nth -= 1
+                continue
             end = index[i + 1][0] - 1 if i + 1 < len(index) else ""
             return start, end
     raise KeyError(f"{match!r} not in {url.rsplit('/', 1)[-1]}")
@@ -209,12 +221,14 @@ def decode(content, subset=None, step=1):
 
 
 def get_fields(url, wanted, **kw):
-    """Download {name: index match} fields from one file. Downloads run in parallel; decoding stays on
-    one thread because ecCodes isn't guaranteed to be thread-safe."""
+    """Download {name: index match} fields from one file; a match can also be (match, n) for the nth of
+    several messages with the same description. Downloads run in parallel; decoding stays on one thread
+    because ecCodes isn't guaranteed to be thread-safe."""
     index = read_index(url)
 
     def fetch(match):
-        start, end = byte_range(index, match, url)
+        match, nth = (match, 0) if isinstance(match, str) else match
+        start, end = byte_range(index, match, url, nth)
         resp = session.get(url, headers={"Range": f"bytes={start}-{end}"}, timeout=120)
         resp.raise_for_status()
         return resp.content
@@ -322,11 +336,11 @@ def contours(ax, x, y, values, levels, color="#ffffff", width=0.9, dashed=False)
     ax.clabel(cs, fmt="%d", fontsize=8, inline=True, inline_spacing=2)
 
 
-def barbs(ax, x, y, u, v):
-    """GFS winds are earth-relative and Mercator keeps angles, so barbs can be drawn straight on."""
-    s = (slice(None, None, 10), slice(None, None, 10))
-    ax.barbs(x[s], y[s], u.values[s] * 1.94384, v.values[s] * 1.94384,  # m/s -> kt
-             length=5, linewidth=0.55, color="#dfe6ff", zorder=5)
+def barbs(ax, x, y, u, v, every=10, color="#dfe6ff"):
+    """Earth-relative winds (m/s): Mercator keeps angles, so barbs can be drawn straight on."""
+    s = (slice(None, None, every), slice(None, None, every))
+    ax.barbs(x[s], y[s], np.asarray(u)[s] * 1.94384, np.asarray(v)[s] * 1.94384,  # m/s -> kt
+             length=5, linewidth=0.55, color=color, zorder=5)
 
 
 def with_units(da, unit):
@@ -481,7 +495,52 @@ def nbm_fields(fhr):
         "snow": f"ASNOW:surface:{fhr - 6}-{fhr} hour acc fcst$",
         "gust": f"GUST:10 m above ground:{fhr} hour fcst$",
         "sky": f"TCDC:surface:{fhr} hour fcst$",
+        **(nbm_cloud_layer_fields(fhr) if fhr <= NBM_LAYER_HOURS else {}),
     }
+
+
+# The NBM gives the base, coverage and top of up to three cloud layers, lowest first, out to F036. Their
+# index entries say "reserved" because the levels are NCEP local codes (195, 196, 197), so the three are told
+# apart by order. Heights are in metres above ground. A layer that isn't there has coverage 0 and is filled
+# with a base of 25,000 ft and a top of 45,000 ft (7620.5 and 13716 m); tops are capped at 45,000 ft.
+NBM_LAYER_HOURS = 36
+
+
+def nbm_cloud_layer_fields(fhr):
+    w = {}
+    for n in range(3):
+        for var, key in (("CDCB", "base"), ("TCDC", "cover"), ("CDCTOP", "top")):
+            w[f"{key}{n + 1}"] = (f"{var}:reserved:{fhr} hour fcst$", n)
+    w["retop"] = f"RETOP:cloud top:{fhr} hour fcst$"
+    return w
+
+
+def echo_top_lines(ax, x, y, tops_kft):
+    """Labelled contours of the radar echo top: where the model's storms reach 25, 35 and 45 thousand ft."""
+    halo = [pe.withStroke(linewidth=2.4, foreground="#0b1022")]
+    cs = ax.contour(x, y, gaussian_filter(np.nan_to_num(tops_kft), sigma=1), levels=ECHO_TOPS,
+                    colors=["#ffd166", "#ff9f43", "#ff453a"], linewidths=1.1, zorder=4)
+    cs.set(path_effects=halo)
+    for t in ax.clabel(cs, fmt="%d", fontsize=8, inline=True, inline_spacing=2):
+        t.set_path_effects(halo)
+
+
+def nbm_cloud_tops(f, canvas):
+    """The top of the highest cloud layer with any coverage, and echo tops. Past F036 the layers are blank."""
+    if "top1" not in f:
+        return
+    x, y = lonlat(f["top1"])
+    tops = np.full(f["top1"].shape, np.nan)
+    for n in (1, 2, 3):
+        base, top = f[f"base{n}"].values, f[f"top{n}"].values
+        # Some thin layers come with coverage but only the fill values for base and top; their height is unknown.
+        filled = (np.abs(base - 7620.5) < 2) & (top > 13700)
+        here = (f[f"cover{n}"].values > 0) & ~filled
+        tops = np.where(here, np.fmax(tops, top), tops)
+    shade(canvas("tops"), x, y, np.minimum(tops * FT / 1000, TOPS_LEVELS[-1] - 0.01), TOPS)
+    echo = f["retop"].values.astype(float)
+    echo[(echo <= 0) | (echo > 80000)] = np.nan   # 88888 means no echo
+    echo_top_lines(canvas("echo"), x, y, echo * FT / 1000)
 
 
 def simple(field, scale, convert=lambda v: v):
@@ -498,6 +557,7 @@ MS_TO_MPH = lambda v: v * 2.23694
 # ---------------------------------------------------------------- HRRR
 
 HRRR_BUCKET = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
+HRRR_CONE = np.sin(np.radians(38.5))
 
 
 def hrrr_url(cycle, fhr):
@@ -514,6 +574,10 @@ def hrrr_fields(fhr):
         "ushr": f"VUCSH:0-6000 m above ground:{fhr} hour fcst$",
         "vshr": f"VVCSH:0-6000 m above ground:{fhr} hour fcst$",
         "uh": f"MXUPHL:5000-2000 m above ground:{fhr - 1}-{fhr} hour max fcst$",
+        "ctop": f"HGT:cloud top:{fhr} hour fcst$",
+        "retop": f"RETOP:cloud top:{fhr} hour fcst$",
+        "ustm": f"USTM:0-6000 m above ground:{fhr} hour fcst$",
+        "vstm": f"VSTM:0-6000 m above ground:{fhr} hour fcst$",
         "tcc": f"TCDC:entire atmosphere:{fhr} hour fcst$",
         "mslp": f"MSLMA:mean sea level:{fhr} hour fcst$",
         "d2m": f"DPT:2 m above ground:{fhr} hour fcst$",
@@ -522,6 +586,25 @@ def hrrr_fields(fhr):
         "prate": f"PRATE:surface:{fhr} hour fcst$",
         **{var.lower(): f"{var}:surface:{fhr} hour fcst$" for var in ("CRAIN", "CSNOW", "CICEP", "CFRZR")},
     }
+
+
+def hrrr_earth_wind(lon, u, v):
+    """HRRR winds are relative to its Lambert conformal grid (true at 38.5°N, centered on 97.5°W); turn them to
+    true north before plotting."""
+    a = np.radians(HRRR_CONE * ((lon + 180) % 360 - 180 + 97.5))
+    return np.cos(a) * u + np.sin(a) * v, -np.sin(a) * u + np.cos(a) * v
+
+
+def hrrr_cloud_tops(f, canvas):
+    """Cloud top height above sea level, echo tops, and the model's storm motion."""
+    x, y = lonlat(f["ctop"])
+    tops = f["ctop"].values * FT / 1000   # missing where there's no cloud
+    shade(canvas("tops"), x, y, np.minimum(tops, TOPS_LEVELS[-1] - 0.01), TOPS)
+    echo = f["retop"].values.astype(float)
+    echo[echo <= 0] = np.nan   # -999 means no echo
+    echo_top_lines(canvas("echo"), x, y, echo * FT / 1000)
+    u, v = hrrr_earth_wind(f["ustm"].longitude.values, f["ustm"].values, f["vstm"].values)
+    barbs(canvas("motion"), x, y, u, v, every=35, color="#b8ffd9")
 
 
 def hrrr_severe(f, canvas):
@@ -623,18 +706,11 @@ def gfs_surface_prep(f):
             "u10": f["u10"].values, "v10": f["v10"].values, "gust": f["gust"].values}
 
 
-# HRRR winds are relative to its Lambert conformal grid (true at 38.5°N, centered on 97.5°W) and must be
-# turned to true north before they are plotted.
-HRRR_CONE = np.sin(np.radians(38.5))
-
-
 def hrrr_surface_prep(f):
-    lon = (f["u10"].longitude.values + 180) % 360 - 180
-    a = np.radians(HRRR_CONE * (lon + 97.5))
-    u, v = f["u10"].values, f["v10"].values
+    u, v = hrrr_earth_wind(f["u10"].longitude.values, f["u10"].values, f["v10"].values)
     return {"grid": f["t2m"], "tcc": f["tcc"].values, "rate": f["prate"].values * 3600, "ptype": noaa_ptype(f),
             "mslp": gaussian_filter(f["mslp"].values / 100, sigma=3), "t2m": f["t2m"].values, "d2m": f["d2m"].values,
-            "u10": np.cos(a) * u + np.sin(a) * v, "v10": -np.sin(a) * u + np.cos(a) * v, "gust": f["gust"].values}
+            "u10": u, "v10": v, "gust": f["gust"].values}
 
 
 # ECMWF precipitation type codes -> ours. Wet snow and rain-snow mix count as snow; freezing drizzle as
@@ -857,6 +933,10 @@ UPPER_AIR_NOTE = ("Green is precipitable water, the moisture in the whole column
 # ---------------------------------------------------------------- models
 
 LINES_PRESSURE = "White lines: sea-level pressure, every 4 hPa"
+ECHO_LINE = "Lines: echo tops at 25 (yellow), 35 (orange) and 45 (red) thousand ft"
+TOPS_LEGEND = legend("Cloud top (thousands of ft above ground)", TOPS_LEVELS, TOPS[0], lines=ECHO_LINE)
+TOPS_LEGEND_MSL = legend("Cloud top (thousands of ft above sea level)", TOPS_LEVELS, TOPS[0],
+                         lines=ECHO_LINE + " · green barbs: storm motion (kt)")
 CLOUDS_LEGEND = legend("Total cloud cover (%)", CLOUD_LEVELS, CLOUD[0], extra=[[c[2], c[1]] for c in CEILING_CATS])
 CLOUDS_LAYERS = [layer("cloud", "Cloud cover", legend("Total cloud cover (%)", CLOUD_LEVELS, CLOUD[0]))] + [
     layer(lid, label.split(" ")[0] + " ceilings", key=[[color, label]])
@@ -919,6 +999,12 @@ MODELS = {
             product("snow", "6-hour snow", simple("snow", SNOW, lambda v: v * 39.3701), legend("6-hour snowfall (in)", SNOW_LEVELS, SNOW[0])),
             product("gust", "Wind gusts", simple("gust", GUST, MS_TO_MPH), legend("Wind gust (mph)", GUST_LEVELS, GUST[0])),
             product("sky", "Sky cover", simple("sky", CLOUD), legend("Sky cover (%)", CLOUD_LEVELS, CLOUD[0])),
+            product("ctop", "Cloud tops", nbm_cloud_tops, TOPS_LEGEND,
+                    "Top of the highest cloud layer, in thousands of feet above ground (the HRRR's are above sea "
+                    "level). Colored lines are echo tops: how high the radar echoes of the forecast storms reach. "
+                    "The NBM's cloud layers only go out 36 hours, so later hours are blank.",
+                    [layer("tops", "Cloud tops", legend(TOPS_LEGEND["label"], TOPS_LEVELS, TOPS[0])),
+                     layer("echo", "Echo tops", line=ECHO_LINE)]),
         ],
         "note": "The National Blend of Models combines many models and is the starting point for National Weather Service forecasts.",
     },
@@ -937,6 +1023,13 @@ MODELS = {
                     "supercells and lines. Ingredients, not a forecast of storms.",
                     [layer("cape", "CAPE", legend("Surface-based CAPE (J/kg)", CAPE_LEVELS, CAPE[0])),
                      layer("shear", "0–6 km shear", line="White lines: 0–6 km bulk shear (kt)")]),
+            product("ctop", "Cloud tops", hrrr_cloud_tops, TOPS_LEGEND_MSL,
+                    "Top of the highest cloud, in thousands of feet above sea level (roughly flight level). Colored "
+                    "lines are echo tops: how high the radar echoes of the forecast storms reach. Barbs are the "
+                    "model's storm motion (Bunkers right-mover, from the 0–6 km wind), in knots.",
+                    [layer("tops", "Cloud tops", legend(TOPS_LEGEND_MSL["label"], TOPS_LEVELS, TOPS[0])),
+                     layer("echo", "Echo tops", line=ECHO_LINE),
+                     layer("motion", "Storm motion", line="Green barbs: storm motion (kt)")]),
             product("uh", "Updraft helicity", simple("uh", UH),
                     legend("2–5 km updraft helicity, hourly max (m²/s²)", UH_LEVELS, UH[0]),
                     "Tracks of rotating updrafts in the model's simulated storms. Values above about 75 often mark "
