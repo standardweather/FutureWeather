@@ -11,6 +11,10 @@ download helpers with make_plots.py; every hazard is computed again from the raw
 Output, per model:
   site/airmetcast/data/<model>/f<hhh>.geojson   hazard polygons, lines and points for one forecast hour
   site/airmetcast/data/<model>.json             run info and the hours drawn
+The GFS run also writes winds and temperatures aloft at the old FD/FB bulletin points and levels, which
+AviationWeather's Winds aloft tab reads (the NWS retired the US FB bulletin along with the NAM):
+  site/airmetcast/data/winds/f<hhh>.json        each point's wind and temperature at 3,000 ft to FL390, F003–F048
+  site/airmetcast/data/winds.json               run info and the hours written
 
 How each hazard is found (thresholds are starting points, to be tuned against PIREPs and archived G-AIRMETs):
   IFR             ceiling below 1,000 ft AGL or visibility below 3 SM over at least half of a ~60 km box
@@ -47,6 +51,7 @@ from shapely.geometry import LineString, Polygon, mapping, shape
 from make_plots import byte_range, latest_cycle, read_index, session
 
 OUT = Path(__file__).parent / "site" / "airmetcast" / "data"
+STATIONS = Path(__file__).parent / "site" / "stations.json"
 CLIMATE = Path(__file__).parent / "turb_climate.json"
 
 MIN_AREA_SQMI = 3000
@@ -828,6 +833,91 @@ def clip(feats):
     return out
 
 
+# ---------------------------------------------------------------- winds aloft
+
+# The points and levels of the retired FD/FB winds aloft bulletin for the lower 48. Levels below 18,000 ft
+# are feet MSL, 18,000 ft and up are pressure altitude, as in the bulletin.
+WIND_ALTS = [3000, 6000, 9000, 12000, 18000, 24000, 30000, 34000, 39000]
+WIND_MAX_FHR = 48
+WIND_IDS = """ABI ABQ ABR ACK ACY AGC ALB ALS AMA AST ATL AVP AXN BAM BCE BDL BFF BGR BHM BIH BIL BLH BML BNA BOI BOS BRL BRO
+    BUF CAE CAR CGI CHS CLE CLL CMH COU CRP CRW CSG CVG CZI DAL DBQ DEN DIK DLH DLN DRT DSM ECK EKN EKO ELP ELY EMI EVV EYW
+    FAT FLO FMN FOT FSD FSM FWA GAG GCK GEG GFK GGW GJT GLD GPI GRB GRI GSP GTF HAT HOU HSV ICT ILM IMB IND INK INL JAN JAX
+    JFK JOT LAS LBB LCH LIT LKV LND LOU LRD LSE LWS MBW MCW MEM MGM MIA MKC MKG MLB MLS MOB MOT MQT MRF MSP MSY OKC OMA ONL
+    ONT ORF OTH PDX PFN PHX PIE PIH PIR PLB PRC PSB PSX PUB PWM RAP RBL RDM RDU RIC RKS RNO ROA ROW SAC SAN SAT SAV SBA SEA
+    SFO SGF SHV SIY SLC SLN SPI SPS SSM STL SYR TCC TLH TRI TUL TUS TVC TYS WJF YKM ZUN""".split()
+# Bulletin points that are navaids rather than airports in stations.json (approximate positions).
+WIND_POINTS = {"CZI": (43.99, -106.44), "ECK": (43.26, -82.72), "EMI": (39.50, -76.98), "HAT": (35.27, -75.55),
+               "IMB": (44.65, -119.71), "MBW": (41.85, -106.00), "MQT": (46.53, -87.56), "PFN": (30.21, -85.68),
+               "PLB": (44.69, -73.52), "ZUN": (34.97, -109.15)}
+WIND_NOTE = ("GFS model winds and temperatures aloft at the old FD bulletin points, interpolated from the 0.25° "
+             "pressure levels. Model output, not an official NWS winds aloft forecast.")
+
+
+def wind_stations():
+    known = {r[0]: (r[1], r[2]) for r in json.loads(STATIONS.read_text())}
+    return [(i, *(known.get(i) or WIND_POINTS[i])) for i in WIND_IDS if i in known or i in WIND_POINTS]
+
+
+def at_point(a, g, lat, lon):
+    """Bilinear value of a (..., y, x) field on a regular lat/lon grid at one point."""
+    r = (g.lat[0, 0] - lat) / (g.lat[0, 0] - g.lat[1, 0])
+    c = (lon - g.lon[0, 0]) / (g.lon[0, 1] - g.lon[0, 0])
+    r0 = int(np.clip(np.floor(r), 0, g.shape[0] - 2))
+    c0 = int(np.clip(np.floor(c), 0, g.shape[1] - 2))
+    fr, fc = r - r0, c - c0
+    return (a[..., r0, c0] * (1 - fr) * (1 - fc) + a[..., r0 + 1, c0] * fr * (1 - fc)
+            + a[..., r0, c0 + 1] * (1 - fr) * fc + a[..., r0 + 1, c0 + 1] * fr * fc)
+
+
+def point_winds(c, f, g, lat, lon):
+    """Wind and temperature at each WIND_ALTS level over one point, left out the way the bulletin leaves
+    them out: no wind within 1,500 ft of the ground, no temperature within 2,500 ft or at 3,000 ft."""
+    u, v, t, z = (at_point(c[k], g, lat, lon) for k in ("u", "v", "t", "z"))
+    zs, ps = float(at_point(f["zsfc"], g, lat, lon)), float(at_point(f["psfc"], g, lat, lon)) / 100
+    p = np.array(LEVELS, dtype=float)
+    ok = (p <= ps) & (z >= zs)
+    if ok.sum() < 2:
+        return {}, zs * FT
+    msl, pa = z[ok] * FT, pressure_alt_ft(p[ok])
+    u, v, t = u[ok], v[ok], t[ok]
+    elev = zs * FT
+    levels = {}
+    for alt in WIND_ALTS:
+        if alt - elev < 1500:
+            continue
+        h = msl if alt < 18000 else pa
+        uu, vv, tt = (float(np.interp(alt, h, a)) for a in (u, v, t))
+        temp = None if alt == 3000 or alt - elev < 2500 else int(round(tt - 273.15))
+        spd = math.hypot(uu, vv) * KT
+        if spd < 5:
+            levels[str(alt)] = {"lv": True, "temp": temp}
+            continue
+        d = int(round(math.degrees(math.atan2(-uu, -vv)) % 360 / 10)) * 10
+        levels[str(alt)] = {"dir": d or 360, "spd": int(round(spd)), "temp": temp}
+    return levels, elev
+
+
+def write_winds(f, g, stations, cycle, fhr):
+    c = column(f)
+    out = []
+    for sid, lat, lon in stations:
+        levels, elev = point_winds(c, f, g, lat, lon)
+        out.append({"id": sid, "lat": lat, "lon": lon, "elev": int(round(elev)), "levels": levels})
+    d = OUT / "winds"
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"model": "GFS", "cycle": cycle.strftime("%Y-%m-%dT%HZ"), "fhr": fhr,
+           "valid": (cycle + timedelta(hours=fhr)).isoformat(), "stations": out}
+    (d / f"f{fhr:03d}.json").write_text(json.dumps(doc, separators=(",", ":")))
+
+
+def write_winds_index(cycle, hours):
+    info = {"model": "GFS 0.25°", "cycle": cycle.strftime("%Y-%m-%dT%HZ"), "init": cycle.isoformat(),
+            "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"), "hours": hours,
+            "alts": WIND_ALTS, "note": WIND_NOTE}
+    OUT.mkdir(parents=True, exist_ok=True)
+    (OUT / "winds.json").write_text(json.dumps(info, indent=1))
+
+
 def write_hour(model_id, fhr, valid, feats):
     feats = clip(feats)
     d = OUT / model_id
@@ -849,18 +939,32 @@ def run_gfs(hours):
     g = gfs_grid()
     cycle = latest_cycle(gfs_url, hours[-1])
     print(f"GFS: cycle {cycle:%Y-%m-%d %HZ}")
-    done = []
+    stations = wind_stations()
+    done, wind_done = [], []
     for fhr in hours:
         t0 = time.time()
         try:
             f = decode_all(fetch(gfs_url(cycle, fhr), gfs_wanted(fhr)), g)
-            feats = gfs_hazards(f, g, climate)
         except Exception as e:   # one bad hour shouldn't sink the run
+            print(f"  F{fhr:03d} skipped: {e!r}")
+            continue
+        if fhr <= WIND_MAX_FHR:   # winds aloft don't depend on the hazard code, so a hazard bug can't drop them
+            try:
+                write_winds(f, g, stations, cycle, fhr)
+                wind_done.append(fhr)
+            except Exception as e:
+                print(f"  F{fhr:03d} winds aloft skipped: {e!r}")
+        try:
+            feats = gfs_hazards(f, g, climate)
+        except Exception as e:
             print(f"  F{fhr:03d} skipped: {e!r}")
             continue
         write_hour("gfs", fhr, cycle + timedelta(hours=fhr), feats)
         done.append(fhr)
         print(f"  F{fhr:03d} {time.time() - t0:.0f}s {summary(feats)}")
+    if wind_done:
+        write_winds_index(cycle, wind_done)
+        print(f"  winds aloft: {len(stations)} points, F{wind_done[0]:03d}–F{wind_done[-1]:03d}")
     return cycle, done
 
 
