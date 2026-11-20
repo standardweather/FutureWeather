@@ -1069,39 +1069,56 @@ def draw_product(p, fields, img, fhr):
 
 
 def run(model_id):
+    """Draw every forecast hour of one model and write site/models/<model>.json.
+
+    The run file is rewritten after each hour, so a job stopped part way still publishes the hours it
+    finished. FW_BUDGET_MIN (minutes) stops starting new hours once that much time has gone by, so a slow
+    or stalled download can't run the job into its time limit and lose the whole model.
+    """
+    started = time.monotonic()
+    budget = float(os.environ.get("FW_BUDGET_MIN") or 0) * 60
     m = MODELS[model_id]
     hours = m["hours"][: int(os.environ["FW_HOURS"])] if os.environ.get("FW_HOURS") else m["hours"]
     img = OUT / "img" / model_id
     img.mkdir(parents=True, exist_ok=True)
+    (OUT / "models").mkdir(exist_ok=True)
     cycle = latest_cycle(m["url"], m["hours"][-1], m.get("every", 6), m.get("index_suffix", ".idx"))
     get = m.get("get", get_fields)
-    print(f"{m['long']}: cycle {cycle:%Y-%m-%d %HZ}")
+    print(f"{m['long']}: cycle {cycle:%Y-%m-%d %HZ}", flush=True)
     done = []
+
+    def write_info():
+        info = {
+            "id": model_id, "name": m["name"], "long": m["long"], "source": m["source"], "note": m.get("note"),
+            "cycle": cycle.strftime("%Y-%m-%dT%HZ"), "init": cycle.isoformat(),
+            "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "hours": done,
+            "products": [{"id": p["id"], "name": p["name"], "legend": p["legend"],
+                          **({"note": p["note"]} if p["note"] else {}), **({"layers": p["layers"]} if p["layers"] else {})}
+                         for p in m["products"]],
+        }
+        path = OUT / "models" / f"{model_id}.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(info, indent=1))
+        tmp.replace(path)   # never leave a half-written file if the job is stopped mid-write
+
     for fhr in hours:
+        if budget and time.monotonic() - started > budget:
+            print(f"  out of time after {len(done)} hours; publishing those", flush=True)
+            break
         try:
             fields = get(m["url"](cycle, fhr), m["fields"](fhr), **m["decode"])
         except Exception as e:   # one bad hour shouldn't sink the run
-            print(f"  F{fhr:03d} skipped: {e}")
+            print(f"  F{fhr:03d} skipped: {e}", flush=True)
             continue
         fields["valid"] = cycle + timedelta(hours=fhr)
         for p in m["products"]:
             draw_product(p, fields, img, fhr)
         done.append(fhr)
-        print(f"  F{fhr:03d} done")
+        write_info()
+        print(f"  F{fhr:03d} done", flush=True)
     if not done:
         raise SystemExit(f"{model_id}: no forecast hours drawn")
-    info = {
-        "id": model_id, "name": m["name"], "long": m["long"], "source": m["source"], "note": m.get("note"),
-        "cycle": cycle.strftime("%Y-%m-%dT%HZ"), "init": cycle.isoformat(),
-        "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "hours": done,
-        "products": [{"id": p["id"], "name": p["name"], "legend": p["legend"],
-                      **({"note": p["note"]} if p["note"] else {}), **({"layers": p["layers"]} if p["layers"] else {})}
-                     for p in m["products"]],
-    }
-    (OUT / "models").mkdir(exist_ok=True)
-    (OUT / "models" / f"{model_id}.json").write_text(json.dumps(info, indent=1))
-
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in MODELS:

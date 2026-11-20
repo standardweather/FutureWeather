@@ -35,7 +35,31 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python make_plots.py ${{ matrix.model }}
+      # make_plots.py stops starting new hours after FW_BUDGET_MIN and rewrites its run file after every
+      # hour, so a slow or stalled download (the ECMWF bucket does this now and then) still publishes the
+      # hours that finished. The step limit stops a stall inside one hour without cancelling the job.
+      - id: plots
+        run: python -u make_plots.py ${{ matrix.model }}
+        timeout-minutes: 24
+        continue-on-error: true
+        env:
+          FW_BUDGET_MIN: "20"
+      # Keep each good run, so a model with nothing new this time shows its last run instead of vanishing.
+      - if: hashFiles(format('site/models/{0}.json', matrix.model)) != ''
+        uses: actions/cache/save@v4
+        with:
+          key: fw-${{ matrix.model }}-${{ github.run_id }}
+          path: |
+            site/img/${{ matrix.model }}
+            site/models/${{ matrix.model }}.json
+      - if: hashFiles(format('site/models/{0}.json', matrix.model)) == ''
+        uses: actions/cache/restore@v4
+        with:
+          key: fw-${{ matrix.model }}-${{ github.run_id }}
+          restore-keys: fw-${{ matrix.model }}-
+          path: |
+            site/img/${{ matrix.model }}
+            site/models/${{ matrix.model }}.json
       - uses: actions/upload-artifact@v4
         with:
           name: model-${{ matrix.model }}
@@ -43,6 +67,10 @@ jobs:
             site/img/${{ matrix.model }}
             site/models/${{ matrix.model }}.json
           retention-days: 1
+          if-no-files-found: ignore
+      # Still mark the job failed when the model didn't finish, so it shows in the Actions tab.
+      - if: steps.plots.outcome != 'success'
+        run: exit 1
 
   # The GEFS ensemble for the Confidence view: 31 members, packed into small binary tiles.
   ensemble:
