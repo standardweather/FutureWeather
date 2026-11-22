@@ -4,6 +4,8 @@ on:
   # GFS 0.25° output through F168 is usually on AWS about 4h20m after each cycle, NBM and the 48-hour
   # HRRR well before that. These times leave some margin; if a run isn't finished yet, each model
   # falls back to its previous complete cycle.
+  # GitHub starts these hours late or drops them, so keep-schedule.yml also starts this workflow at
+  # these times without relying on the schedule.
   schedule:
     - cron: "50 4,10,16,22 * * *"
   push:
