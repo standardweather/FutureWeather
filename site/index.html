@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FutureWeather | Standard Weather</title>
   <meta name="description" content="FutureWeather — GFS, ECMWF, National Blend of Models and HRRR forecast maps, surface maps with forecast station plots, upper-air composite maps, plus the National Weather Service forecast for any U.S. location." />
-  <meta name="theme-color" content="#070914" />
+  <meta name="theme-color" content="#e9edeb" />
   <link rel="canonical" href="https://standardweather.net/FutureWeather/" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://standardweather.net/FutureWeather/" />
@@ -14,21 +14,21 @@
   <meta property="og:image" content="https://standardweather.net/logo.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png" />
   <link rel="icon" type="image/png" sizes="192x192" href="/assets/icon-192.png" />
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="color-scheme" content="light" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <!-- Shared theme and console layout from the main site (standardweather.github.io repo). -->
-  <link rel="stylesheet" href="/css/site.css?v=20261024a" />
-  <link rel="stylesheet" href="/css/console.css?v=2" />
+  <link rel="stylesheet" href="/css/site.css?v=20261127" />
+  <link rel="stylesheet" href="/css/console.css?v=3" />
   <style>
     /* FutureWeather-only pieces; the shared console layout is in /css/console.css. */
     .prod { all: unset; box-sizing: border-box; display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; width: 100%; padding: 0.55rem 1.25rem;
       border: 0; border-top: 1px solid var(--rule); background: none; color: var(--text2); font: 500 0.88rem var(--font); text-align: left; cursor: pointer; }
-    .prod:hover, .prod:active { transform: none; filter: none; background: rgba(255, 255, 255, 0.03); color: #fff; }
-    .prod[aria-pressed="true"] { color: #fff; background: rgba(74, 209, 255, 0.07); box-shadow: inset 3px 0 0 var(--accent); }
+    .prod:hover, .prod:active { transform: none; filter: none; background: rgba(255, 255, 255, 0.03); color: var(--ink); }
+    .prod[aria-pressed="true"] { color: var(--ink); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
     .prod small { font: 0.72rem var(--mono); color: var(--text3); }
     .bins { display: flex; height: 0.55rem; border-radius: 2px; overflow: hidden; margin-top: 0.35rem; }
     .bins i { flex: 1; }
@@ -42,8 +42,8 @@
     .stage.split #map { right: 50%; }
     #map2 { display: none; background: #0b1022; position: absolute; top: 0; bottom: 0; right: 0; left: 50%; border-left: 1px solid var(--rule); }
     .stage.split #map2 { display: block; }
-    .maptag { position: absolute; z-index: 800; top: 0.6rem; padding: 0.2rem 0.55rem; border-radius: 6px; background: rgba(8, 10, 24, 0.85);
-      border: 1px solid var(--rule); font: 500 0.78rem var(--mono); color: #fff; pointer-events: none; }
+    .maptag { position: absolute; z-index: 800; top: 0.6rem; padding: 0.2rem 0.55rem; border-radius: 6px; background: rgba(12, 22, 21, 0.85);
+      border: 1px solid var(--rule); font: 500 0.78rem var(--mono); color: var(--ink); pointer-events: none; }
     #tag1 { right: calc(50% + 3.4rem); } #tag2 { right: 3.4rem; }
     .linkish { all: unset; cursor: pointer; color: var(--accent); font-size: 0.82rem; }
     .linkish:hover { text-decoration: underline; }
@@ -51,15 +51,15 @@
     /* Work windows */
     .limits-box { margin-top: 0.7rem; font-size: 0.8rem; color: var(--text2); }
     .limits-box summary { cursor: pointer; color: var(--text2); }
-    .limits-box summary:hover { color: #fff; }
+    .limits-box summary:hover { color: var(--ink); }
     .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem 0.7rem; margin-top: 0.75rem; }
     .limits label { display: flex; flex-direction: column; gap: 0.2rem; font: 500 0.7rem var(--font); color: var(--text3); letter-spacing: 0; text-transform: none; }
     .limits input { min-height: 0; padding: 0.35rem 0.5rem; font: 0.82rem var(--mono); border-radius: 6px; box-shadow: none; }
     .limits label.day { flex-direction: row; align-items: center; gap: 0.45rem; font-size: 0.8rem; color: var(--text2); grid-column: 1 / -1; }
     .limits label.day input { appearance: auto; width: 0.9rem; height: 0.9rem; padding: 0; accent-color: var(--accent); }
-    .conf-sum { margin: 0.2rem 0 0.7rem; padding: 0.15rem 0.7rem 0.45rem; border-left: 3px solid var(--accent); background: rgba(74, 209, 255, 0.05); }
+    .conf-sum { margin: 0.2rem 0 0.7rem; padding: 0.15rem 0.7rem 0.45rem; border-left: 3px solid var(--accent); background: var(--accent-soft); }
     .conf-sum p { margin: 0.35rem 0 0; font-size: 0.8rem; color: var(--text2); line-height: 1.5; max-width: none; }
-    .conf-sum b { color: #fff; font-weight: 600; }
+    .conf-sum b { color: var(--ink); font-weight: 600; }
     table.conf th small { display: block; font-weight: 400; color: var(--text3); font-size: 0.66rem; }
     table.conf .bar { height: 3px; margin-top: 3px; background: rgba(255, 255, 255, 0.08); border-radius: 2px; }
     table.conf .bar i { display: block; height: 100%; background: #4ad1ff; border-radius: 2px; }
